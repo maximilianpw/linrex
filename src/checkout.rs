@@ -343,10 +343,7 @@ mod tests {
             Path::new("/work/dash-eng-12")
         );
         let jj = repo(Path::new("/src/api"), VcsChoice::Jj);
-        assert_eq!(
-            jj.checkout_path("eng-12"),
-            Path::new("/src/api.jj-eng-12")
-        );
+        assert_eq!(jj.checkout_path("eng-12"), Path::new("/src/api.jj-eng-12"));
     }
 
     #[test]

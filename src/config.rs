@@ -10,6 +10,7 @@ use crate::checkout::{DEFAULT_NAMING, Repo, VcsChoice, validate_naming};
 #[derive(Debug)]
 pub struct Config {
     pub session: SessionConfig,
+    pub agents: Vec<AgentConfig>,
     pub workspaces: Vec<WorkspaceConfig>,
     pub repos: Vec<RepoConfig>,
     env_file: EnvFile,
@@ -22,6 +23,8 @@ struct RawConfig {
     #[serde(default)]
     session: SessionConfig,
     #[serde(default)]
+    agents: Vec<AgentConfig>,
+    #[serde(default)]
     checkouts: CheckoutsConfig,
     #[serde(default)]
     workspaces: Vec<WorkspaceConfig>,
@@ -32,8 +35,6 @@ struct RawConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionConfig {
-    #[serde(default = "default_command")]
-    pub command: Vec<String>,
     #[serde(default = "default_true")]
     pub move_to_started: bool,
 }
@@ -41,20 +42,22 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            command: default_command(),
             move_to_started: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    pub name: String,
+    pub command: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckoutsConfig {
     naming: Option<String>,
-}
-
-fn default_command() -> Vec<String> {
-    vec!["claude".into()]
 }
 
 fn default_true() -> bool {
@@ -221,14 +224,22 @@ impl Config {
                 .map(|repo| RepoConfig::resolve(repo, default_naming))
                 .collect::<Result<_>>()?,
             session: raw.session,
+            agents: if raw.agents.is_empty() {
+                vec![AgentConfig {
+                    name: "Claude".into(),
+                    command: vec!["claude".into()],
+                }]
+            } else {
+                raw.agents
+            },
             workspaces: raw.workspaces,
             env_file: EnvFile::default(),
         };
         if config.workspaces.is_empty() {
             bail!("add at least one [[workspaces]] entry");
         }
-        if config.session.command.is_empty() {
-            bail!("session.command must name a program");
+        if let Some(agent) = config.agents.iter().find(|a| a.command.is_empty()) {
+            bail!("agent {:?} has an empty command", agent.name);
         }
         for (index, workspace) in config.workspaces.iter().enumerate() {
             if config.workspaces[..index]
@@ -361,7 +372,8 @@ mod tests {
     }
 
     const EXAMPLE: &str = r#"
-        [session]
+        [[agents]]
+        name = "Claude (opus)"
         command = ["claude", "--model", "opus"]
 
         [[workspaces]]
@@ -454,10 +466,7 @@ mod tests {
         let RepoMatch::One(repo) = config.repo_for("work", "ENG", None) else {
             panic!("expected one repo");
         };
-        assert_eq!(
-            repo.checkout_path("eng-9"),
-            Path::new("/w/web-app-eng-9")
-        );
+        assert_eq!(repo.checkout_path("eng-9"), Path::new("/w/web-app-eng-9"));
         let RepoMatch::One(other) = config.repo_for("work", "OTHER", None) else {
             panic!("expected one repo");
         };
@@ -465,9 +474,11 @@ mod tests {
     }
 
     #[test]
-    fn session_defaults_to_claude() {
+    fn agents_default_to_claude() {
         let config = parse("[[workspaces]]\nname = \"a\"\napi_key_env = \"X\"");
-        assert_eq!(config.session.command, ["claude"]);
+        assert_eq!(config.agents.len(), 1);
+        assert_eq!(config.agents[0].command, ["claude"]);
         assert!(config.session.move_to_started);
+        assert_eq!(parse(EXAMPLE).agents[0].name, "Claude (opus)");
     }
 }

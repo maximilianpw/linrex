@@ -1,5 +1,3 @@
-use crate::checkout::Repo;
-
 use crate::linear::Priority;
 
 use super::app::IssueKey;
@@ -14,7 +12,6 @@ pub enum Choice {
         team_id: String,
         team_key: String,
     },
-    Repo(Repo),
 }
 
 #[derive(Debug, Clone)]

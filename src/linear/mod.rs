@@ -123,38 +123,15 @@ impl LinearClient {
             "query { viewer { id displayName teams(first: 100) { nodes { id key name } } } organization { name } }",
             json!({}),
         )?;
-        let team_ids: Vec<&str> = data
-            .viewer
-            .teams
-            .nodes
-            .iter()
-            .map(|t| t.id.as_str())
-            .collect();
         let active = json!({ "state": { "type": { "nin": ["completed", "canceled"] } } });
 
-        let mut issues = self.issue_pages(
+        let issues = self.issue_pages(
             "/viewer/assignedIssues",
             &format!(
                 "query($after: String, $filter: IssueFilter) {{ viewer {{ assignedIssues(first: 100, after: $after, filter: $filter, orderBy: updatedAt) {{ nodes {{ ...IssueFields }} pageInfo {{ hasNextPage endCursor }} }} }} }} {ISSUE_FIELDS}"
             ),
-            active.clone(),
+            active,
         )?;
-        if !team_ids.is_empty() {
-            let mut team_filter = active;
-            team_filter["team"] = json!({ "id": { "in": team_ids } });
-            let team_issues = self.issue_pages(
-                "/issues",
-                &format!(
-                    "query($after: String, $filter: IssueFilter) {{ issues(first: 100, after: $after, filter: $filter, orderBy: updatedAt) {{ nodes {{ ...IssueFields }} pageInfo {{ hasNextPage endCursor }} }} }} {ISSUE_FIELDS}"
-                ),
-                team_filter,
-            )?;
-            for issue in team_issues {
-                if !issues.iter().any(|known| known.id == issue.id) {
-                    issues.push(issue);
-                }
-            }
-        }
 
         Ok(WorkspaceSnapshot {
             viewer: User {

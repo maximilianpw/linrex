@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::checkout::{CheckoutRequest, Repo, ensure_checkout};
+use crate::checkout::{Checkout, CheckoutRequest, Repo, ensure_checkout};
 use crate::linear::{Comment, Issue, IssueUpdate, LinearClient};
 use crate::rex::{NewSession, Rex, RexSession};
 
@@ -38,7 +38,7 @@ pub fn find_session<'a>(sessions: &'a [RexSession], identifier: &str) -> Option<
     })
 }
 
-pub fn issue_prompt(issue: &Issue, comments: &[Comment]) -> String {
+pub fn issue_prompt(issue: &Issue, comments: &[Comment], notes: Option<&str>) -> String {
     let mut prompt = format!(
         "Work on Linear issue {}: {}\n\nURL: {}\nTeam: {} · Status: {} · Priority: {}\n",
         issue.identifier,
@@ -78,6 +78,9 @@ pub fn issue_prompt(issue: &Issue, comments: &[Comment]) -> String {
             );
         }
     }
+    if let Some(notes) = notes.map(str::trim).filter(|n| !n.is_empty()) {
+        let _ = write!(prompt, "\n## Notes from me\n\n{notes}\n");
+    }
     prompt
 }
 
@@ -105,7 +108,9 @@ pub enum StatusChange {
 
 pub struct StartOptions<'a> {
     pub repo: &'a Repo,
+    pub per_issue_checkout: bool,
     pub command: &'a [String],
+    pub notes: Option<&'a str>,
     pub move_to_started: bool,
 }
 
@@ -130,21 +135,29 @@ pub fn start(
         });
     }
 
-    let description = format!("{}: {}", issue.identifier, issue.title);
-    let checkout = ensure_checkout(
-        options.repo,
-        &CheckoutRequest {
-            issue: &session_prefix(&issue.identifier),
-            branch: &issue.branch_name,
-            description: &description,
-        },
-    )?;
+    let checkout = if options.per_issue_checkout {
+        let description = format!("{}: {}", issue.identifier, issue.title);
+        ensure_checkout(
+            options.repo,
+            &CheckoutRequest {
+                issue: &session_prefix(&issue.identifier),
+                branch: &issue.branch_name,
+                description: &description,
+            },
+        )?
+    } else {
+        Checkout {
+            path: options.repo.path.clone(),
+            vcs: options.repo.vcs(),
+            created: false,
+        }
+    };
 
     let comments = linear
         .comments(&issue.id)
         .context("could not load the issue's comments")?;
     let mut command = options.command.to_vec();
-    command.push(issue_prompt(issue, &comments));
+    command.push(issue_prompt(issue, &comments, options.notes));
 
     let label = session_label(issue);
     let session_id = rex.create_session(&NewSession {
@@ -260,11 +273,16 @@ mod tests {
                 user: None,
             })
             .collect();
-        let prompt = issue_prompt(&issue("ENG-1", "Thing"), &comments);
+        let prompt = issue_prompt(
+            &issue("ENG-1", "Thing"),
+            &comments,
+            Some("  Start with the API.\n"),
+        );
         assert!(prompt.starts_with("Work on Linear issue ENG-1: Thing"));
         assert!(prompt.contains("Do the thing"));
         assert!(prompt.contains("sam/eng-1129-flag"));
         assert!(prompt.contains("comment 19") && prompt.contains("comment 5"));
         assert!(!prompt.contains("comment 4\n"));
+        assert!(prompt.ends_with("## Notes from me\n\nStart with the API.\n"));
     }
 }

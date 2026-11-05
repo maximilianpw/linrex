@@ -36,6 +36,15 @@ enum Command {
         identifier: String,
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Agent name from the config (default: the first one)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Run in the repo itself instead of a per-issue checkout
+        #[arg(long)]
+        no_checkout: bool,
+        /// Extra context appended to the agent's prompt
+        #[arg(long)]
+        notes: Option<String>,
     },
     /// Print the config file path
     ConfigPath,
@@ -54,9 +63,22 @@ fn main() -> Result<()> {
         }
         None => tui::run(Config::load(&path)?),
         Some(Command::List) => list(&Config::load(&path)?),
-        Some(Command::Start { identifier, repo }) => {
-            start(&Config::load(&path)?, &identifier, repo)
-        }
+        Some(Command::Start {
+            identifier,
+            repo,
+            agent,
+            no_checkout,
+            notes,
+        }) => start(
+            &Config::load(&path)?,
+            &identifier,
+            &StartFlags {
+                repo,
+                agent,
+                per_issue_checkout: !no_checkout,
+                notes,
+            },
+        ),
     }
 }
 
@@ -107,7 +129,25 @@ fn list(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn start(config: &Config, identifier: &str, repo: Option<PathBuf>) -> Result<()> {
+struct StartFlags {
+    repo: Option<PathBuf>,
+    agent: Option<String>,
+    per_issue_checkout: bool,
+    notes: Option<String>,
+}
+
+fn start(config: &Config, identifier: &str, flags: &StartFlags) -> Result<()> {
+    let agent = match &flags.agent {
+        Some(name) => config
+            .agents
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .with_context(|| {
+                let names: Vec<&str> = config.agents.iter().map(|a| a.name.as_str()).collect();
+                format!("no agent named {name:?}; configured: {}", names.join(", "))
+            })?,
+        None => &config.agents[0],
+    };
     let mut errors = Vec::new();
     let found = clients(config).find_map(|(name, client)| {
         let result = client.and_then(|c| {
@@ -122,9 +162,9 @@ fn start(config: &Config, identifier: &str, repo: Option<PathBuf>) -> Result<()>
     let Some((workspace, client, issue)) = found else {
         bail!("{identifier} was not found:\n  {}", errors.join("\n  "));
     };
-    let repo = match repo {
+    let repo = match &flags.repo {
         Some(path) => {
-            let path = std::path::absolute(&path)?;
+            let path = std::path::absolute(path)?;
             config
                 .repos
                 .iter()
@@ -157,7 +197,9 @@ fn start(config: &Config, identifier: &str, repo: Option<PathBuf>) -> Result<()>
         &issue,
         &StartOptions {
             repo: &repo,
-            command: &config.session.command,
+            per_issue_checkout: flags.per_issue_checkout,
+            command: &agent.command,
+            notes: flags.notes.as_deref(),
             move_to_started: config.session.move_to_started,
         },
     )?;

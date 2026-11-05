@@ -1,13 +1,16 @@
 # linrex
 
-A terminal UI for your Linear issues across several Linear workspaces, with one
-[Rex](https://www.superlogical.com/rex) session per issue.
+A terminal UI for the Linear issues assigned to you across several Linear
+workspaces, with one [Rex](https://www.superlogical.com/rex) session per issue.
 
-Press Enter on an issue:
+The screen is a fuzzy-searchable list of your open issues above the selected
+issue's details. Start typing to search. Press Enter on an issue:
 
 - If a Rex session for it is already running, the Rex app switches to it.
-- Otherwise linrex finds or creates a per-issue checkout, opens a new Rex
-  session there running Claude Code with the issue as its first prompt, and
+- Otherwise a dispatch screen opens. Pick the agent, the repo if several
+  match, whether to use a per-issue checkout, and add optional notes for the
+  agent. Enter again creates the checkout, opens a new Rex session there
+  running the agent with the issue (and your notes) as its first prompt, and
   switches the app to it. Issues that haven't been started move to the team's
   first started state, such as In Progress.
 
@@ -50,27 +53,57 @@ env file that other users can read.
 
 ## Keys
 
+Typing always edits the search, so commands use Ctrl.
+
 | Key | Action |
 | --- | --- |
-| `enter` | Switch to the issue's session, or start one |
-| `j` `k` `g` `G`, `ctrl-d` `ctrl-u` | Move |
-| `J` `K` | Scroll the detail pane |
-| `tab` | Toggle My issues / Team (active issues in your teams) |
-| `/` | Filter; `esc` clears |
-| `s` `a` `p` | Set status, assignee, priority |
-| `c` | Comment (`ctrl-s` sends) |
-| `n` | New issue: pick a team, then the first line is the title (`ctrl-s` creates) |
-| `o` | Open in the browser |
-| `r` | Reload |
-| `?` | Help |
+| type, `backspace`, `ctrl-w` | Fuzzy search; `ctrl-w` deletes a word |
+| `↑` `↓`, `pgup` `pgdn` | Move |
+| `enter` | Switch to the issue's session, or open the dispatch screen |
+| `ctrl-s` `ctrl-t` `ctrl-p` | Set status, assignee, priority |
+| `ctrl-e` | Comment (`ctrl-s` sends) |
+| `ctrl-n` | New issue: pick a team, then the first line is the title (`ctrl-s` creates) |
+| `ctrl-o` | Open in the browser |
+| `ctrl-f` | Cycle the project filter through your issues' projects |
+| `ctrl-u` `ctrl-d` | Scroll the details |
+| `ctrl-r` | Reload |
+| `esc` | Clear the search, then the project filter, then quit |
+
+On the dispatch screen:
+
+| Key | Action |
+| --- | --- |
+| `enter` | Start the session |
+| `↑` `↓` | Choose the agent |
+| `tab` `shift-tab` | Choose the repo |
+| `ctrl-w` | Toggle the per-issue checkout (off runs in the repo itself) |
+| type, `alt-enter` | Notes for the agent; `alt-enter` adds a line |
+| `esc` | Back |
 
 The `●` next to an issue means a Rex session for it is running. Sessions are
 re-read every 5 seconds.
 
+## Agents
+
+`[[agents]]` in the config lists the commands the dispatch screen offers. The
+prompt is appended as the last argument. Without any, linrex runs `claude`.
+
+```toml
+[[agents]]
+name = "Claude"
+command = ["claude"]
+
+[[agents]]
+name = "Codex"
+command = ["codex"]
+```
+
 ## Commands
 
-- `linrex start ENG-123 [--repo PATH]` does what Enter does, without the TUI.
-  You can bind it to a Rex key or call it from scripts.
+- `linrex start ENG-123 [--repo PATH] [--agent NAME] [--no-checkout] [--notes TEXT]`
+  does what Enter and the dispatch screen do, without the TUI. It uses the
+  first agent unless you name one. You can bind it to a Rex key or call it
+  from scripts.
 - `linrex list` prints your active assigned issues in every workspace.
 - `linrex config-path` prints the config path.
 

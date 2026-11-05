@@ -3,35 +3,71 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+    Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
 };
 
+use crate::checkout::Vcs;
 use crate::config::RepoMatch;
-use crate::linear::{Issue, Priority, StateType};
+use crate::issue_session::session_label;
+use crate::linear::Priority;
 
 use super::app::{
-    App, CheckoutPreview, Comments, Compose, Entry, Mode, NoticeKind, View, WorkspaceLoad,
+    App, CheckoutPreview, Comments, Compose, Dispatch, Entry, Mode, NoticeKind, WorkspaceLoad,
+    describe_checkout, tilde,
 };
 use super::picker::Picker;
 
 const ACCENT: Color = Color::Rgb(122, 162, 247);
+const YELLOW: Color = Color::Rgb(230, 200, 100);
 const DIM: Color = Color::Rgb(110, 115, 135);
 const SESSION: Color = Color::Rgb(120, 200, 120);
+const SELECTED_BG: Color = Color::Rgb(45, 50, 70);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
+const MAIN_KEYS: &str = "↵ open · ^s status · ^t assign · ^p priority · ^e comment · ^n new · ^o browser · ^f project · ^u ^d scroll · ^r refresh · esc quit";
+const DISPATCH_KEYS: &str =
+    "↵ start · ↑↓ agent · tab repo · ^w checkout · alt-↵ newline · esc back";
+
 pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
+    let keys = if matches!(app.mode, Mode::Dispatch(_)) {
+        DISPATCH_KEYS
+    } else {
+        MAIN_KEYS
+    };
+    let width = frame.area().width.max(1) as usize;
+    let key_lines = keys.chars().count().div_ceil(width) as u16;
+    let notice_lines = app
+        .notice
+        .as_ref()
+        .map_or(0, |n| (n.text.chars().count() + 1).div_ceil(width) as u16);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(key_lines + notice_lines),
     ])
     .areas(frame.area());
     draw_header(frame, app, header, frame_count);
-    let [list, detail] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(body);
+    draw_footer(frame, app, footer, keys);
+
+    if let Mode::Dispatch(dispatch) = &app.mode {
+        draw_dispatch(frame, app, dispatch, body);
+        return;
+    }
+    let list_height = (app.visible.len() as u16 + 1).clamp(4, body.height * 45 / 100);
+    let [list, rule, detail] = Layout::vertical([
+        Constraint::Length(list_height.max(4)),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(body);
     draw_list(frame, app, list);
+    frame.render_widget(
+        Block::new()
+            .borders(Borders::TOP)
+            .border_style(Style::new().fg(DIM)),
+        rule,
+    );
     draw_detail(frame, app, detail);
-    draw_footer(frame, app, footer);
 
     match &app.mode {
         Mode::Picker(picker) => draw_picker(frame, picker),
@@ -51,27 +87,30 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
             frame.render_widget(block, area);
             frame.render_widget(editor.as_ref(), inner);
         }
-        Mode::Help => draw_help(frame),
-        Mode::Normal | Mode::Filter => {}
+        Mode::Normal | Mode::Dispatch(_) => {}
     }
 }
 
+fn separator() -> Span<'static> {
+    Span::styled(" · ", Style::new().fg(DIM))
+}
+
 fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) {
-    let tab = |label: &str, view: View| {
-        if app.view == view {
-            Span::styled(
-                format!(" {label} "),
-                Style::new().fg(Color::Black).bg(ACCENT).bold(),
-            )
-        } else {
-            Span::styled(format!(" {label} "), Style::new().fg(DIM))
-        }
-    };
     let mut spans = vec![
-        Span::styled(" linrex ", Style::new().fg(ACCENT).bold()),
-        tab("My issues", View::Mine),
-        tab("Team", View::Team),
-        Span::raw("  "),
+        Span::styled(" linrex", Style::new().fg(ACCENT).bold()),
+        separator(),
+        Span::raw("my issues"),
+        separator(),
+        match &app.project {
+            Some(project) => Span::styled(project.clone(), Style::new().fg(YELLOW).bold()),
+            None => Span::styled("all projects", Style::new().fg(DIM)),
+        },
+        separator(),
+        Span::styled(
+            format!("{}/{}", app.visible.len(), app.entries.len()),
+            Style::new().fg(DIM),
+        ),
+        separator(),
     ];
     for workspace in &app.workspaces {
         let (marker, style) = match &workspace.load {
@@ -87,64 +126,37 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) {
             Style::new().fg(ACCENT),
         ));
     }
-    if !app.filter.is_empty() || matches!(app.mode, Mode::Filter) {
-        spans.push(Span::raw("   / ").fg(DIM));
-        spans.push(Span::raw(app.filter.clone()).bold());
-        if matches!(app.mode, Mode::Filter) {
-            spans.push(Span::raw("▏").fg(ACCENT));
-        }
-    }
     frame.render_widget(Line::from(spans), area);
 }
 
-fn state_glyph(kind: StateType) -> &'static str {
-    match kind {
-        StateType::Triage => "◇",
-        StateType::Backlog => "◌",
-        StateType::Unstarted => "○",
-        StateType::Started => "◐",
-        StateType::Completed => "●",
-        StateType::Canceled => "⊘",
-        StateType::Other => "·",
-    }
-}
-
-fn priority_span(priority: Priority) -> Span<'static> {
-    match priority {
-        Priority::Urgent => Span::styled("!!", Style::new().fg(Color::Red).bold()),
-        Priority::High => Span::styled("▲ ", Style::new().fg(Color::Rgb(240, 150, 80))),
-        Priority::Medium => Span::styled("■ ", Style::new().fg(Color::Rgb(200, 200, 120))),
-        Priority::Low => Span::styled("▼ ", Style::new().fg(DIM)),
-        Priority::None => Span::styled("  ", Style::new()),
-    }
-}
-
-fn hex_color(hex: &str) -> Color {
-    let hex = hex.trim_start_matches('#');
-    match (
-        u8::from_str_radix(hex.get(0..2).unwrap_or(""), 16),
-        u8::from_str_radix(hex.get(2..4).unwrap_or(""), 16),
-        u8::from_str_radix(hex.get(4..6).unwrap_or(""), 16),
-    ) {
-        (Ok(r), Ok(g), Ok(b)) => Color::Rgb(r, g, b),
-        _ => Color::Gray,
-    }
-}
-
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    let [search, rows_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let search_line = if app.query.is_empty() {
+        Line::from(vec![
+            Span::styled(" › ", Style::new().fg(ACCENT)),
+            Span::styled("▏", Style::new().fg(ACCENT)),
+            Span::styled("fuzzy search your issues…", Style::new().fg(DIM)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" › ", Style::new().fg(ACCENT)),
+            Span::raw(app.query.clone()),
+            Span::styled("▏", Style::new().fg(ACCENT)),
+        ])
+    };
+    frame.render_widget(search_line, search);
+
     let multi = app.multi_workspace();
-    let show_assignee = app.view == View::Team && area.width >= 80;
     let rows: Vec<Row> = app
         .visible
         .iter()
         .map(|&index| {
             let entry = &app.entries[index];
             let issue = &entry.issue;
-            let has_session = app.session_for(issue).is_some();
-            let starting = app.starting.contains(&issue.identifier);
-            let marker = if starting {
+            let marker = if app.starting.contains(&issue.identifier) {
                 Span::styled("…", Style::new().fg(ACCENT))
-            } else if has_session {
+            } else if app.session_for(issue).is_some() {
                 Span::styled("●", Style::new().fg(SESSION))
             } else {
                 Span::raw(" ")
@@ -152,28 +164,13 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut cells = vec![
                 Cell::from(marker),
                 Cell::from(Span::styled(issue.identifier.clone(), Style::new().fg(DIM))),
-                Cell::from(Line::from(vec![
-                    Span::styled(
-                        state_glyph(issue.state.kind),
-                        Style::new().fg(hex_color(&issue.state.color)),
-                    ),
-                    Span::raw(" "),
-                    Span::raw(issue.state.name.clone()),
-                ])),
+                Cell::from(Span::styled(
+                    issue.state.name.clone(),
+                    Style::new().fg(hex_color(&issue.state.color)),
+                )),
                 Cell::from(priority_span(issue.priority)),
                 Cell::from(issue.title.clone()),
             ];
-            if show_assignee {
-                cells.push(Cell::from(
-                    Span::raw(
-                        issue
-                            .assignee
-                            .as_ref()
-                            .map_or("—".into(), |a| a.display_name.clone()),
-                    )
-                    .fg(DIM),
-                ));
-            }
             if multi {
                 cells.push(Cell::from(
                     Span::raw(app.workspaces[entry.workspace].name.clone()).fg(DIM),
@@ -184,58 +181,36 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let mut widths = vec![
         Constraint::Length(1),
-        Constraint::Length(10),
-        Constraint::Length(14),
+        Constraint::Length(9),
+        Constraint::Length(12),
         Constraint::Length(2),
         Constraint::Fill(1),
     ];
-    if show_assignee {
-        widths.push(Constraint::Length(12));
-    }
     if multi {
         widths.push(Constraint::Length(8));
     }
-    let title = format!(
-        " {} issue{} ",
-        app.visible.len(),
-        if app.visible.len() == 1 { "" } else { "s" }
-    );
     let empty = app.visible.is_empty();
     let table = Table::new(rows, widths)
         .column_spacing(1)
-        .block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(DIM))
-                .title(title),
-        )
-        .row_highlight_style(
-            Style::new()
-                .bg(Color::Rgb(45, 50, 70))
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_stateful_widget(table, area, &mut app.table);
+        .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD));
+    frame.render_stateful_widget(table, rows_area, &mut app.table);
     if empty {
         let loading = app
             .workspaces
             .iter()
             .any(|w| matches!(w.load, WorkspaceLoad::Loading));
         let message = if loading {
-            "Loading issues…"
-        } else if !app.filter.is_empty() {
-            "No issues match the filter"
+            "Loading your issues…"
+        } else if !app.query.is_empty() || app.project.is_some() {
+            "No issues match"
         } else {
-            "No issues"
+            "No open issues assigned to you"
         };
-        let inner = Block::bordered().inner(area);
-        frame.render_widget(Paragraph::new(message).fg(DIM).centered(), inner);
+        frame.render_widget(Line::from(format!("   {message}")).fg(DIM), rows_area);
     }
 }
 
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(DIM));
     let Some(entry) = app.selected() else {
         let failures: Vec<Line> = app
             .workspaces
@@ -247,79 +222,72 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
                 _ => None,
             })
             .collect();
-        frame.render_widget(
-            Paragraph::new(failures)
-                .wrap(Wrap { trim: false })
-                .block(block),
-            area,
-        );
+        frame.render_widget(Paragraph::new(failures).wrap(Wrap { trim: false }), area);
         return;
     };
-    let text = detail_text(app, entry);
+    let inner = area.inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(detail_text(app, entry))
             .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll, 0))
-            .block(block.title(format!(" {} ", entry.issue.identifier))),
-        area,
+            .scroll((app.detail_scroll, 0)),
+        inner,
     );
 }
 
-fn field(name: &str, value: impl Into<String>) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{name:<10}"), Style::new().fg(DIM)),
-        Span::raw(value.into()),
-    ])
-}
-
-fn detail_text(app: &App, entry: &Entry) -> Text<'static> {
-    let issue: &Issue = &entry.issue;
-    let mut lines = vec![
-        Line::from(issue.title.clone()).bold(),
-        Line::default(),
-        Line::from(vec![
-            Span::styled(format!("{:<10}", "Status"), Style::new().fg(DIM)),
-            Span::styled(
-                state_glyph(issue.state.kind),
-                Style::new().fg(hex_color(&issue.state.color)),
-            ),
-            Span::raw(format!(" {}", issue.state.name)),
-        ]),
-        field("Priority", issue.priority.label()),
-        field(
-            "Assignee",
+fn meta_line(app: &App, entry: &Entry) -> Line<'static> {
+    let issue = &entry.issue;
+    let mut spans = vec![
+        Span::styled(
+            issue.state.name.clone(),
+            Style::new().fg(hex_color(&issue.state.color)).bold(),
+        ),
+        separator(),
+        Span::styled(issue.priority.label(), Style::new().fg(DIM)),
+        separator(),
+        Span::styled(
             issue
                 .assignee
                 .as_ref()
                 .map_or("Unassigned".into(), |a| a.display_name.clone()),
+            Style::new().fg(DIM),
         ),
-        field("Team", format!("{} · {}", issue.team.key, issue.team.name)),
+        separator(),
+        Span::styled(issue.team.key.clone(), Style::new().fg(DIM)),
     ];
     if let Some(project) = &issue.project {
-        lines.push(field("Project", project.clone()));
-    }
-    if !issue.labels.is_empty() {
-        lines.push(field("Labels", issue.labels.join(", ")));
+        spans.push(separator());
+        spans.push(Span::styled(project.clone(), Style::new().fg(YELLOW)));
     }
     if app.multi_workspace() {
-        lines.push(field(
-            "Workspace",
+        spans.push(separator());
+        spans.push(Span::styled(
             app.workspaces[entry.workspace].name.clone(),
+            Style::new().fg(DIM),
         ));
     }
+    Line::from(spans)
+}
+
+fn detail_text(app: &App, entry: &Entry) -> Text<'static> {
+    let issue = &entry.issue;
+    let mut lines = vec![
+        Line::from(issue.identifier.clone()).fg(DIM),
+        Line::from(issue.title.clone()).bold(),
+        meta_line(app, entry),
+    ];
+    if !issue.labels.is_empty() {
+        let tags: Vec<String> = issue.labels.iter().map(|l| format!("#{l}")).collect();
+        lines.push(Line::from(tags.join(" ")).fg(DIM));
+    }
+    lines.push(session_line(app, entry));
     lines.push(Line::default());
-    lines.extend(session_lines(app, entry));
-    lines.push(Line::default());
-    lines.push(Line::from("Description").fg(ACCENT).bold());
     match &issue.description {
         Some(description) => lines.extend(markdown_lines(description)),
         None => lines.push(Line::from("No description").fg(DIM)),
     }
     lines.push(Line::default());
     match app.comments.get(&entry.key()) {
-        Some(Comments::Loaded(comments)) if comments.is_empty() => {
-            lines.push(Line::from("No comments").fg(DIM));
-        }
+        Some(Comments::Loaded(comments)) if comments.is_empty() => {}
         Some(Comments::Loaded(comments)) => {
             lines.push(
                 Line::from(format!("Comments ({})", comments.len()))
@@ -353,31 +321,170 @@ fn detail_text(app: &App, entry: &Entry) -> Text<'static> {
     Text::from(lines)
 }
 
-fn session_lines(app: &App, entry: &Entry) -> Vec<Line<'static>> {
+fn session_line(app: &App, entry: &Entry) -> Line<'static> {
     if let Some(session) = app.session_for(&entry.issue) {
-        return vec![
-            Line::from(vec![
-                Span::styled(format!("{:<10}", "Session"), Style::new().fg(DIM)),
-                Span::styled("● ", Style::new().fg(SESSION)),
-                Span::raw(session.label.clone()).bold(),
-            ]),
-            Line::from("          enter switches to it").fg(DIM),
-        ];
+        return Line::from(vec![
+            Span::styled("● ", Style::new().fg(SESSION)),
+            Span::styled(session.label.clone(), Style::new().fg(SESSION)),
+            Span::styled("  ↵ switches to it", Style::new().fg(DIM)),
+        ]);
     }
     let checkout = match &app.checkout_preview {
         Some(CheckoutPreview { key, text }) if *key == entry.key() => text.clone(),
         _ => match app.repo_match(entry) {
             RepoMatch::One(_) => "…".into(),
-            RepoMatch::Ambiguous(repos) => format!("pick one of {} repos", repos.len()),
+            RepoMatch::Ambiguous(repos) => format!("{} matching repos", repos.len()),
             RepoMatch::Unmapped => format!("team {} has no mapped repo", entry.issue.team.key),
         },
     };
-    vec![
-        field("Session", "none · enter starts one"),
-        field("Checkout", checkout),
-    ]
+    Line::from(vec![
+        Span::styled("○ no session", Style::new().fg(DIM)),
+        Span::styled(format!("  ↵ starts one · {checkout}"), Style::new().fg(DIM)),
+    ])
 }
 
+fn draw_dispatch(frame: &mut Frame, app: &App, dispatch: &Dispatch, area: Rect) {
+    let Some(entry) = app.entry(&dispatch.target) else {
+        return;
+    };
+    let issue = &entry.issue;
+    let label_style = Style::new().fg(DIM);
+    let label = |text: &str| Span::styled(format!("{text:<10}"), label_style);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(format!("{} ", issue.identifier), Style::new().fg(DIM)),
+            Span::raw(issue.title.clone()).bold(),
+        ]),
+        Line::from(vec![
+            label("Session"),
+            Span::raw(session_label(issue)),
+            Span::styled("  new Rex session", Style::new().fg(DIM)),
+        ]),
+        Line::default(),
+    ];
+    for (index, agent) in app.agents().iter().enumerate() {
+        let chosen = index == dispatch.agent;
+        lines.push(Line::from(vec![
+            if index == 0 {
+                label("Agent")
+            } else {
+                label("")
+            },
+            Span::styled(if chosen { "› " } else { "  " }, Style::new().fg(ACCENT)),
+            Span::styled(
+                format!("{:<18}", agent.name),
+                if chosen {
+                    Style::new().fg(ACCENT).bold()
+                } else {
+                    Style::new()
+                },
+            ),
+            Span::styled(agent.command.join(" "), Style::new().fg(DIM)),
+        ]));
+    }
+    lines.push(Line::default());
+    let repo = dispatch.repo();
+    let mut repo_line = vec![label("Repo"), Span::raw(tilde(&repo.path))];
+    if dispatch.repos.len() > 1 {
+        repo_line.push(Span::styled(
+            format!(
+                "  {}/{} · tab for next",
+                dispatch.repo + 1,
+                dispatch.repos.len()
+            ),
+            Style::new().fg(DIM),
+        ));
+    }
+    lines.push(Line::from(repo_line));
+    if repo.vcs() == Vcs::None {
+        lines.push(Line::from(vec![
+            label("Checkout"),
+            Span::styled("plain folder, shared by all issues", Style::new().fg(DIM)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            label("Checkout"),
+            Span::styled(
+                if dispatch.per_issue_checkout {
+                    "[x] "
+                } else {
+                    "[ ] "
+                },
+                Style::new().fg(ACCENT),
+            ),
+            Span::raw(format!(
+                "per-issue {}",
+                match repo.vcs() {
+                    Vcs::Jj => "jj workspace",
+                    _ => "git worktree",
+                }
+            )),
+            Span::styled("  ^w toggles", Style::new().fg(DIM)),
+        ]));
+        lines.push(Line::from(vec![
+            label(""),
+            Span::styled(
+                if dispatch.per_issue_checkout {
+                    format!("    {}", describe_checkout(&dispatch.checkout))
+                } else {
+                    format!("    {} · main checkout", tilde(&dispatch.checkout.path))
+                },
+                Style::new().fg(DIM),
+            ),
+        ]));
+    }
+    if app.moves_to_started() && issue.state.kind.is_not_started() {
+        lines.push(Line::from(vec![
+            label("Status"),
+            Span::raw(format!("{} → first started state", issue.state.name)),
+        ]));
+    }
+    let info_height = lines.len() as u16 + 1;
+    let [info, notes] = Layout::vertical([Constraint::Length(info_height), Constraint::Min(3)])
+        .areas(area.inner(ratatui::layout::Margin::new(1, 0)));
+    frame.render_widget(Paragraph::new(lines), info);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT))
+        .title(" Notes for the agent (optional) ");
+    let inner = block.inner(notes);
+    frame.render_widget(block, notes);
+    frame.render_widget(&dispatch.notes, inner);
+}
+
+fn draw_footer(frame: &mut Frame, app: &App, area: Rect, keys: &str) {
+    let mut lines = Vec::new();
+    if let Some(notice) = &app.notice {
+        let color = match notice.kind {
+            NoticeKind::Info => ACCENT,
+            NoticeKind::Error => Color::Red,
+        };
+        lines.push(Line::from(format!(" {}", notice.text)).fg(color));
+    }
+    lines.push(Line::from(keys).fg(DIM));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn priority_span(priority: Priority) -> Span<'static> {
+    match priority {
+        Priority::Urgent => Span::styled("!!", Style::new().fg(Color::Red).bold()),
+        Priority::High => Span::styled("▲ ", Style::new().fg(Color::Rgb(240, 150, 80))),
+        Priority::Medium => Span::styled("■ ", Style::new().fg(Color::Rgb(200, 200, 120))),
+        Priority::Low => Span::styled("▼ ", Style::new().fg(DIM)),
+        Priority::None => Span::styled("  ", Style::new()),
+    }
+}
+fn hex_color(hex: &str) -> Color {
+    let hex = hex.trim_start_matches('#');
+    match (
+        u8::from_str_radix(hex.get(0..2).unwrap_or(""), 16),
+        u8::from_str_radix(hex.get(2..4).unwrap_or(""), 16),
+        u8::from_str_radix(hex.get(4..6).unwrap_or(""), 16),
+    ) {
+        (Ok(r), Ok(g), Ok(b)) => Color::Rgb(r, g, b),
+        _ => Color::Gray,
+    }
+}
 fn markdown_lines(text: &str) -> Vec<Line<'static>> {
     let mut in_code = false;
     text.lines()
@@ -404,25 +511,6 @@ fn markdown_lines(text: &str) -> Vec<Line<'static>> {
         })
         .collect()
 }
-
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let line = match (&app.notice, &app.mode) {
-        (_, Mode::Filter) => Line::from(" type to filter · enter keep · esc clear").fg(DIM),
-        (Some(notice), _) => {
-            let color = match notice.kind {
-                NoticeKind::Info => ACCENT,
-                NoticeKind::Error => Color::Red,
-            };
-            Line::from(format!(" {}", notice.text)).fg(color)
-        }
-        (None, _) => Line::from(
-            " enter session · s status · a assign · p priority · c comment · n new · o open · / filter · tab view · ? help",
-        )
-        .fg(DIM),
-    };
-    frame.render_widget(line, area);
-}
-
 fn popup(area: Rect, width: u16, height: u16) -> Rect {
     let [area] = Layout::horizontal([Constraint::Length(width.min(area.width))])
         .flex(Flex::Center)
@@ -432,7 +520,6 @@ fn popup(area: Rect, width: u16, height: u16) -> Rect {
         .areas(area);
     area
 }
-
 fn draw_picker(frame: &mut Frame, picker: &Picker) {
     let matches = picker.matches();
     let height = (matches.len() as u16 + 4).clamp(6, 20);
@@ -467,41 +554,5 @@ fn draw_picker(frame: &mut Frame, picker: &Picker) {
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(45, 50, 70)).bold()),
         list,
         &mut state,
-    );
-}
-
-fn draw_help(frame: &mut Frame) {
-    let keys = [
-        ("enter", "switch to the issue's Rex session, or start one"),
-        ("j/k ↑/↓", "move · g/G top/bottom · ctrl-d/u page"),
-        ("J/K", "scroll the detail pane"),
-        ("tab", "toggle My issues / Team"),
-        ("/", "filter · esc clears"),
-        ("s a p", "set status, assignee, priority"),
-        ("c", "comment on the issue"),
-        ("n", "create an issue"),
-        ("o", "open in the browser"),
-        ("r", "reload from Linear"),
-        ("q", "quit"),
-    ];
-    let lines: Vec<Line> = keys
-        .iter()
-        .map(|(key, what)| {
-            Line::from(vec![
-                Span::raw(format!("{key:>9}  ")).fg(ACCENT).bold(),
-                Span::raw(*what),
-            ])
-        })
-        .collect();
-    let area = popup(frame.area(), 64, lines.len() as u16 + 2);
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(ACCENT))
-                .title(" Keys "),
-        ),
-        area,
     );
 }

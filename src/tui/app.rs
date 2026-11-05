@@ -3,11 +3,13 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Matcher, Utf32Str};
 use ratatui::widgets::TableState;
 use ratatui_textarea::TextArea;
 
-use crate::checkout::{CheckoutRequest, Repo, Vcs, planned_checkout};
-use crate::config::{Config, RepoMatch};
+use crate::checkout::{Checkout, CheckoutRequest, Repo, Vcs, planned_checkout};
+use crate::config::{AgentConfig, Config, RepoMatch};
 use crate::issue_session::{self, Opened, StartOptions, StatusChange};
 use crate::linear::{
     Comment, Issue, IssueUpdate, LinearClient, NewIssue, Priority, StateType, Team, TeamMeta, User,
@@ -18,6 +20,7 @@ use crate::rex::{Rex, RexSession};
 use super::picker::{Choice, Picker, PickerItem};
 
 const SESSION_POLL: Duration = Duration::from_secs(5);
+const DETAIL_PAGE: u16 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IssueKey {
@@ -72,12 +75,6 @@ impl Workspace {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
-    Mine,
-    Team,
-}
-
 pub struct CheckoutPreview {
     pub key: IssueKey,
     pub text: String,
@@ -101,12 +98,47 @@ pub enum Compose {
     },
 }
 
+pub struct Dispatch {
+    pub target: IssueKey,
+    pub agent: usize,
+    pub repos: Vec<Repo>,
+    pub repo: usize,
+    pub per_issue_checkout: bool,
+    pub checkout: Checkout,
+    pub notes: TextArea<'static>,
+}
+
+impl Dispatch {
+    pub fn repo(&self) -> &Repo {
+        &self.repos[self.repo]
+    }
+
+    fn replan(&mut self, issue: &Issue) {
+        let repo = &self.repos[self.repo];
+        self.checkout = if self.per_issue_checkout {
+            planned_checkout(
+                repo,
+                &CheckoutRequest {
+                    issue: &issue_session::session_prefix(&issue.identifier),
+                    branch: &issue.branch_name,
+                    description: "",
+                },
+            )
+        } else {
+            Checkout {
+                path: repo.path.clone(),
+                vcs: repo.vcs(),
+                created: false,
+            }
+        };
+    }
+}
+
 pub enum Mode {
     Normal,
-    Filter,
-    Help,
     Picker(Picker),
     Compose(Compose, Box<TextArea<'static>>),
+    Dispatch(Box<Dispatch>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -163,13 +195,14 @@ enum Followup {
 pub struct App {
     config: Config,
     rex: Rex,
+    matcher: Matcher,
     pub workspaces: Vec<Workspace>,
     pub entries: Vec<Entry>,
     pub sessions: Vec<RexSession>,
     pub comments: HashMap<IssueKey, Comments>,
     team_meta: HashMap<(usize, String), TeamMeta>,
-    pub view: View,
-    pub filter: String,
+    pub query: String,
+    pub project: Option<String>,
     pub visible: Vec<usize>,
     pub table: TableState,
     pub detail_scroll: u16,
@@ -203,13 +236,14 @@ impl App {
         let mut app = Self {
             config,
             rex: Rex,
+            matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
             workspaces,
             entries: Vec::new(),
             sessions: Vec::new(),
             comments: HashMap::new(),
             team_meta: HashMap::new(),
-            view: View::Mine,
-            filter: String::new(),
+            query: String::new(),
+            project: None,
             visible: Vec::new(),
             table: TableState::default(),
             detail_scroll: 0,
@@ -225,6 +259,18 @@ impl App {
         };
         app.refresh();
         app
+    }
+
+    pub fn agents(&self) -> &[AgentConfig] {
+        &self.config.agents
+    }
+
+    pub fn moves_to_started(&self) -> bool {
+        self.config.session.move_to_started
+    }
+
+    pub fn entry(&self, key: &IssueKey) -> Option<&Entry> {
+        self.entries.iter().find(|e| &e.key() == key)
     }
 
     fn spawn(&mut self, job: impl FnOnce() -> Msg + Send + 'static) {
@@ -317,16 +363,7 @@ impl App {
                 description: "",
             },
         );
-        let state = match (checkout.vcs, checkout.created) {
-            (Vcs::None, _) => "plain folder, shared by all issues",
-            (_, true) => "will be created",
-            (_, false) => "exists",
-        };
-        let text = format!(
-            "{} · {} {state}",
-            tilde(&checkout.path),
-            checkout.vcs.label()
-        );
+        let text = describe_checkout(&checkout);
         self.checkout_preview = Some(CheckoutPreview { key, text });
     }
 
@@ -430,8 +467,7 @@ impl App {
                     Ok(opened) => opened,
                     Err(error) => return self.error(format!("{identifier}: {error}")),
                 };
-                let notice = opened_notice(&opened, shown);
-                self.notice = Some(notice);
+                self.notice = Some(opened_notice(&opened, shown));
                 if let Opened::Created { status, .. } = &opened {
                     self.poll_sessions();
                     let key = self
@@ -475,49 +511,55 @@ impl App {
         });
     }
 
-    pub fn recompute(&mut self, keep: Option<IssueKey>) {
-        let terms: Vec<String> = self
-            .filter
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect();
-        let mut visible: Vec<usize> = self
+    pub fn projects(&self) -> Vec<&str> {
+        let mut projects: Vec<&str> = self
             .entries
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| match self.view {
-                View::Mine => {
-                    let viewer = self.workspaces[entry.workspace].viewer_id();
-                    entry
-                        .issue
-                        .assignee
-                        .as_ref()
-                        .is_some_and(|a| Some(a.id.as_str()) == viewer)
-                }
-                View::Team => true,
-            })
-            .filter(|(_, entry)| {
-                terms
-                    .iter()
-                    .all(|term| haystack(&entry.issue).contains(term.as_str()))
-            })
-            .map(|(index, _)| index)
+            .filter_map(|e| e.issue.project.as_deref())
             .collect();
-        visible.sort_by(|&a, &b| {
+        projects.sort_unstable();
+        projects.dedup();
+        projects
+    }
+
+    pub fn recompute(&mut self, keep: Option<IssueKey>) {
+        let pattern = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
+        let mut buffer = Vec::new();
+        let mut scored: Vec<(usize, u32)> = Vec::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if self
+                .project
+                .as_deref()
+                .is_some_and(|p| entry.issue.project.as_deref() != Some(p))
+            {
+                continue;
+            }
+            let text = haystack(&entry.issue);
+            if let Some(score) = pattern.score(Utf32Str::new(&text, &mut buffer), &mut self.matcher)
+            {
+                scored.push((index, score));
+            }
+        }
+        let ranked = !self.query.trim().is_empty();
+        scored.sort_by(|&(a, score_a), &(b, score_b)| {
             let (a, b) = (&self.entries[a].issue, &self.entries[b].issue);
-            state_rank(a.state.kind)
-                .cmp(&state_rank(b.state.kind))
+            let by_score = if ranked {
+                score_b.cmp(&score_a)
+            } else {
+                std::cmp::Ordering::Equal
+            };
+            by_score
+                .then(state_rank(a.state.kind).cmp(&state_rank(b.state.kind)))
                 .then(a.priority.sort_rank().cmp(&b.priority.sort_rank()))
                 .then(b.updated_at.cmp(&a.updated_at))
         });
-        self.visible = visible;
+        self.visible = scored.into_iter().map(|(index, _)| index).collect();
         let position = keep
             .and_then(|key| {
                 self.visible
                     .iter()
                     .position(|&i| self.entries[i].key() == key)
             })
-            .or_else(|| self.table.selected())
             .unwrap_or(0);
         self.table.select(if self.visible.is_empty() {
             None
@@ -563,6 +605,12 @@ impl App {
         self.detail_scroll = 0;
     }
 
+    fn edit_query(&mut self, edit: impl FnOnce(&mut String)) {
+        edit(&mut self.query);
+        self.recompute(None);
+        self.detail_scroll = 0;
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -571,80 +619,86 @@ impl App {
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         self.mode = match mode {
             Mode::Normal => {
-                self.on_normal_key(key);
+                self.on_main_key(key);
                 return;
             }
-            Mode::Help => Mode::Normal,
-            Mode::Filter => self.on_filter_key(key),
             Mode::Picker(picker) => self.on_picker_key(picker, key),
             Mode::Compose(compose, editor) => self.on_compose_key(compose, editor, key),
+            Mode::Dispatch(dispatch) => self.on_dispatch_key(dispatch, key),
         };
     }
 
-    fn on_normal_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    fn on_main_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('s') => self.open_state_picker(),
+                KeyCode::Char('t') => self.open_assignee_picker(),
+                KeyCode::Char('p') => self.open_priority_picker(),
+                KeyCode::Char('e') => self.open_comment(),
+                KeyCode::Char('n') => self.open_team_picker(),
+                KeyCode::Char('o') => self.open_in_browser(),
+                KeyCode::Char('f') => self.cycle_project(),
+                KeyCode::Char('r') => {
+                    self.info("Refreshing…");
+                    self.refresh();
+                }
+                KeyCode::Char('u') => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(DETAIL_PAGE)
+                }
+                KeyCode::Char('d') => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(DETAIL_PAGE)
+                }
+                KeyCode::Char('w') => self.edit_query(|q| {
+                    let kept = q.trim_end().rfind(' ').map_or(0, |i| i + 1);
+                    q.truncate(kept);
+                }),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('j') | KeyCode::Down => self.select_by(1),
-            KeyCode::Char('k') | KeyCode::Up => self.select_by(-1),
-            KeyCode::Char('d') if ctrl => self.select_by(10),
-            KeyCode::Char('u') if ctrl => self.select_by(-10),
-            KeyCode::Char('g') | KeyCode::Home => self.select_by(isize::MIN / 2),
-            KeyCode::Char('G') | KeyCode::End => self.select_by(isize::MAX / 2),
-            KeyCode::Char('J') => self.detail_scroll = self.detail_scroll.saturating_add(3),
-            KeyCode::Char('K') => self.detail_scroll = self.detail_scroll.saturating_sub(3),
-            KeyCode::Tab => {
-                self.view = match self.view {
-                    View::Mine => View::Team,
-                    View::Team => View::Mine,
-                };
-                let keep = self.selected_key();
-                self.recompute(keep);
-            }
-            KeyCode::Char('/') => self.mode = Mode::Filter,
+            KeyCode::Up => self.select_by(-1),
+            KeyCode::Down => self.select_by(1),
+            KeyCode::PageUp => self.select_by(-10),
+            KeyCode::PageDown => self.select_by(10),
+            KeyCode::Enter => self.open_dispatch(),
             KeyCode::Esc => {
-                self.filter.clear();
-                self.notice = None;
-                let keep = self.selected_key();
-                self.recompute(keep);
+                if !self.query.is_empty() {
+                    self.edit_query(String::clear);
+                } else if self.project.is_some() {
+                    self.project = None;
+                    let keep = self.selected_key();
+                    self.recompute(keep);
+                } else {
+                    self.should_quit = true;
+                }
             }
-            KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Char('r') => {
-                self.info("Refreshing…");
-                self.refresh();
+            KeyCode::Backspace => self.edit_query(|q| {
+                q.pop();
+            }),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => {
+                self.edit_query(|q| q.push(c))
             }
-            KeyCode::Enter => self.open_session(),
-            KeyCode::Char('o') => self.open_in_browser(),
-            KeyCode::Char('s') => self.open_state_picker(),
-            KeyCode::Char('a') => self.open_assignee_picker(),
-            KeyCode::Char('p') => self.open_priority_picker(),
-            KeyCode::Char('c') => self.open_comment(),
-            KeyCode::Char('n') => self.open_team_picker(),
             _ => {}
         }
     }
 
-    fn on_filter_key(&mut self, key: KeyEvent) -> Mode {
+    fn cycle_project(&mut self) {
+        let projects = self.projects();
+        let next = match &self.project {
+            None => projects.first(),
+            Some(current) => projects
+                .iter()
+                .position(|p| p == current)
+                .and_then(|i| projects.get(i + 1)),
+        }
+        .map(|p| (*p).to_owned());
+        if next.is_none() && self.project.is_none() {
+            self.info("None of your issues are in a project");
+        }
+        self.project = next;
         let keep = self.selected_key();
-        match key.code {
-            KeyCode::Enter => return Mode::Normal,
-            KeyCode::Esc => {
-                self.filter.clear();
-                self.recompute(keep);
-                return Mode::Normal;
-            }
-            KeyCode::Backspace => {
-                self.filter.pop();
-            }
-            KeyCode::Char(c) => self.filter.push(c),
-            KeyCode::Down => self.select_by(1),
-            KeyCode::Up => self.select_by(-1),
-            _ => return Mode::Filter,
-        }
-        if !matches!(key.code, KeyCode::Down | KeyCode::Up) {
-            self.recompute(keep);
-        }
-        Mode::Filter
+        self.recompute(keep);
     }
 
     fn on_picker_key(&mut self, mut picker: Picker, key: KeyEvent) -> Mode {
@@ -664,7 +718,7 @@ impl App {
             KeyCode::Backspace => picker.edit_query(|q| {
                 q.pop();
             }),
-            KeyCode::Char(c) => picker.edit_query(|q| q.push(c)),
+            KeyCode::Char(c) if !ctrl => picker.edit_query(|q| q.push(c)),
             _ => {}
         }
         Mode::Picker(picker)
@@ -693,6 +747,43 @@ impl App {
                 Mode::Compose(compose, editor)
             }
         }
+    }
+
+    fn on_dispatch_key(&mut self, mut dispatch: Box<Dispatch>, key: KeyEvent) -> Mode {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(issue) = self.entry(&dispatch.target).map(|e| e.issue.clone()) else {
+            return Mode::Normal;
+        };
+        match key.code {
+            KeyCode::Esc => return Mode::Normal,
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                self.start_session(*dispatch);
+                return Mode::Normal;
+            }
+            KeyCode::Up => {
+                dispatch.agent = dispatch.agent.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                dispatch.agent = (dispatch.agent + 1).min(self.config.agents.len() - 1);
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                let count = dispatch.repos.len();
+                dispatch.repo = if key.code == KeyCode::Tab {
+                    (dispatch.repo + 1) % count
+                } else {
+                    (dispatch.repo + count - 1) % count
+                };
+                dispatch.replan(&issue);
+            }
+            KeyCode::Char('w') if ctrl => {
+                dispatch.per_issue_checkout = !dispatch.per_issue_checkout;
+                dispatch.replan(&issue);
+            }
+            _ => {
+                dispatch.notes.input(key);
+            }
+        }
+        Mode::Dispatch(dispatch)
     }
 
     fn submit(&mut self, compose: Compose, text: String) {
@@ -736,7 +827,7 @@ impl App {
     }
 
     fn apply_choice(&mut self, target: Option<IssueKey>, choice: Choice) -> Mode {
-        match choice {
+        let update = match choice {
             Choice::Team {
                 workspace,
                 team_id,
@@ -754,18 +845,6 @@ impl App {
                     Box::new(editor),
                 );
             }
-            Choice::Repo(repo) => {
-                if let Some(target) = target {
-                    self.start_session(&target, repo);
-                }
-                return Mode::Normal;
-            }
-            Choice::State(_) | Choice::Assignee(_) | Choice::Priority(_) => {}
-        }
-        let Some(target) = target else {
-            return Mode::Normal;
-        };
-        let update = match choice {
             Choice::State(id) => IssueUpdate {
                 state_id: Some(id),
                 ..IssueUpdate::default()
@@ -778,7 +857,9 @@ impl App {
                 priority: Some(priority),
                 ..IssueUpdate::default()
             },
-            Choice::Team { .. } | Choice::Repo(_) => unreachable!("handled above"),
+        };
+        let Some(target) = target else {
+            return Mode::Normal;
         };
         if let Some(client) = self.workspaces[target.workspace].client().cloned() {
             self.spawn(move || Msg::IssueSaved {
@@ -793,26 +874,26 @@ impl App {
         Mode::Normal
     }
 
-    fn open_session(&mut self) {
+    fn open_dispatch(&mut self) {
         let Some(entry) = self.selected() else {
             return;
         };
         let key = entry.key();
         let identifier = entry.issue.identifier.clone();
         let team = entry.issue.team.key.clone();
+        let issue = entry.issue.clone();
         let existing = self.session_for(&entry.issue).cloned();
-        let repos: Result<Repo, Vec<Repo>> = match self.repo_match(entry) {
-            RepoMatch::One(repo) => Ok(repo.clone()),
-            RepoMatch::Ambiguous(repos) => Err(repos.into_iter().cloned().collect()),
+        let repos: Vec<Repo> = match self.repo_match(entry) {
+            RepoMatch::One(repo) => vec![repo.clone()],
+            RepoMatch::Ambiguous(repos) => repos.into_iter().cloned().collect(),
             RepoMatch::Unmapped => {
                 let name = &self.workspaces[key.workspace].name;
-                Err(self
-                    .config
+                self.config
                     .repos
                     .iter()
                     .filter(|r| r.workspace.as_deref().is_none_or(|w| w == name))
                     .map(|r| r.repo.clone())
-                    .collect())
+                    .collect()
             }
         };
         if self.starting.contains(&identifier) {
@@ -834,45 +915,55 @@ impl App {
             });
             return;
         }
-        let candidates = match repos {
-            Ok(repo) => return self.start_session(&key, repo),
-            Err(candidates) => candidates,
-        };
-        if candidates.is_empty() {
+        if repos.is_empty() {
             self.error(format!(
                 "No repository is mapped to team {team}. Add a [[repos]] entry with teams = [\"{team}\"]."
             ));
             return;
         }
-        let items = candidates
-            .into_iter()
-            .map(|repo| PickerItem {
-                label: repo.path.display().to_string(),
-                hint: repo.vcs().label().into(),
-                choice: Choice::Repo(repo),
-            })
-            .collect();
-        self.mode = Mode::Picker(Picker::new(
-            format!("Repository for {identifier}"),
-            Some(key),
-            items,
-        ));
+        let mut notes = TextArea::default();
+        notes.set_placeholder_text(
+            "Anything the issue doesn't say: approach, files to look at, constraints…",
+        );
+        let mut dispatch = Dispatch {
+            target: key,
+            agent: 0,
+            checkout: Checkout {
+                path: repos[0].path.clone(),
+                vcs: Vcs::None,
+                created: false,
+            },
+            repos,
+            repo: 0,
+            per_issue_checkout: true,
+            notes,
+        };
+        dispatch.replan(&issue);
+        self.notice = None;
+        self.mode = Mode::Dispatch(Box::new(dispatch));
     }
 
-    fn start_session(&mut self, key: &IssueKey, repo: Repo) {
-        let Some(entry) = self.entries.iter().find(|e| &e.key() == key) else {
+    fn start_session(&mut self, dispatch: Dispatch) {
+        let Some(entry) = self.entry(&dispatch.target) else {
             return;
         };
-        let Some(client) = self.workspaces[key.workspace].client().cloned() else {
+        let Some(client) = self.workspaces[dispatch.target.workspace].client().cloned() else {
             return;
         };
         let issue = entry.issue.clone();
         let identifier = issue.identifier.clone();
         let rex = self.rex.clone();
-        let command = self.config.session.command.clone();
+        let agent = self.config.agents[dispatch.agent].clone();
         let move_to_started = self.config.session.move_to_started;
+        let notes = dispatch.notes.lines().join("\n");
+        let repo = dispatch.repo().clone();
+        let per_issue_checkout = dispatch.per_issue_checkout;
         self.starting.insert(identifier.clone());
-        self.info(format!("Starting {identifier} in {}…", repo.path.display()));
+        self.info(format!(
+            "Starting {identifier} with {} in {}…",
+            agent.name,
+            tilde(&dispatch.checkout.path)
+        ));
         self.spawn(move || {
             let result = issue_session::start(
                 &rex,
@@ -880,7 +971,9 @@ impl App {
                 &issue,
                 &StartOptions {
                     repo: &repo,
-                    command: &command,
+                    per_issue_checkout,
+                    command: &agent.command,
+                    notes: Some(&notes),
                     move_to_started,
                 },
             )
@@ -941,7 +1034,8 @@ impl App {
         let Some((key, meta)) = self.team_meta_for(Followup::StatePicker) else {
             return;
         };
-        let items = meta
+        let current = self.entry(&key).map(|e| e.issue.state.id.clone());
+        let items: Vec<PickerItem> = meta
             .states
             .iter()
             .map(|s| PickerItem {
@@ -950,8 +1044,17 @@ impl App {
                 choice: Choice::State(s.id.clone()),
             })
             .collect();
+        let selected = items
+            .iter()
+            .position(|i| matches!(&i.choice, Choice::State(id) if Some(id) == current.as_ref()))
+            .unwrap_or(0);
+        let identifier = self
+            .entry(&key)
+            .map_or_else(String::new, |e| e.issue.identifier.clone());
+        let mut picker = Picker::new(format!("Status · {identifier}"), Some(key), items);
+        picker.selected = selected;
         self.notice = None;
-        self.mode = Mode::Picker(Picker::new("Status", Some(key), items));
+        self.mode = Mode::Picker(picker);
     }
 
     fn open_assignee_picker(&mut self) {
@@ -1063,7 +1166,7 @@ fn opened_notice(opened: &Opened, shown: JobResult<()>) -> Notice {
             } else {
                 "checkout"
             };
-            let mut text = format!("Started {label} in {place} {}", checkout.display());
+            let mut text = format!("Started {label} in {place} {}", tilde(checkout));
             match status {
                 StatusChange::Moved(state) => text.push_str(&format!(" · moved to {state}")),
                 StatusChange::Failed(error) => {
@@ -1084,7 +1187,20 @@ fn opened_notice(opened: &Opened, shown: JobResult<()>) -> Notice {
     Notice { kind, text }
 }
 
-fn tilde(path: &std::path::Path) -> String {
+pub fn describe_checkout(checkout: &Checkout) -> String {
+    let state = match (checkout.vcs, checkout.created) {
+        (Vcs::None, _) => "plain folder",
+        (_, true) => "will be created",
+        (_, false) => "exists",
+    };
+    format!(
+        "{} · {} {state}",
+        tilde(&checkout.path),
+        checkout.vcs.label()
+    )
+}
+
+pub fn tilde(path: &std::path::Path) -> String {
     match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok().map(ToOwned::to_owned))
     {
         Some(rest) => format!("~/{}", rest.display()),
@@ -1104,22 +1220,17 @@ fn split_title(text: &str) -> (String, Option<String>) {
 }
 
 fn haystack(issue: &Issue) -> String {
-    let mut text = format!(
-        "{} {} {} {}",
-        issue.identifier, issue.title, issue.state.name, issue.team.key
-    );
-    for extra in [
-        issue.assignee.as_ref().map(|a| a.display_name.as_str()),
-        issue.project.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .chain(issue.labels.iter().map(String::as_str))
+    let mut text = format!("{} {} {}", issue.identifier, issue.title, issue.state.name);
+    for extra in issue
+        .project
+        .iter()
+        .map(String::as_str)
+        .chain(issue.labels.iter().map(String::as_str))
     {
         text.push(' ');
         text.push_str(extra);
     }
-    text.to_lowercase()
+    text
 }
 
 pub fn state_rank(kind: StateType) -> u8 {

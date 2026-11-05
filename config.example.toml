@@ -5,12 +5,20 @@
 # env_file = "~/.config/linrex/.env"
 
 [session]
-# The issue prompt (title, description, comments, URL, branch name) is
-# appended as the last argument.
-command = ["claude"]
 # Move Backlog/Todo/Triage issues to the team's first "started" state when a
 # session is created for them.
 move_to_started = true
+
+# Agents offered on the dispatch screen; the first is the default. The issue
+# prompt (title, description, comments, URL, branch name, your notes) is
+# appended as the last argument.
+[[agents]]
+name = "Claude"
+command = ["claude"]
+
+[[agents]]
+name = "Codex"
+command = ["codex"]
 
 [checkouts]
 # Default name for new per-issue checkouts, created in each repo's
