@@ -47,7 +47,6 @@ pub enum WorkspaceLoad {
     Ready {
         client: LinearClient,
         viewer: User,
-        organization: String,
         teams: Vec<Team>,
     },
     Failed(String),
@@ -202,6 +201,7 @@ pub struct App {
     pub comments: HashMap<IssueKey, Comments>,
     team_meta: HashMap<(usize, String), TeamMeta>,
     pub query: String,
+    pub workspace: usize,
     pub project: Option<String>,
     pub visible: Vec<usize>,
     pub table: TableState,
@@ -233,6 +233,7 @@ impl App {
                 load: WorkspaceLoad::Loading,
             })
             .collect();
+        let default_workspace = config.default_workspace;
         let mut app = Self {
             config,
             rex: Rex,
@@ -243,6 +244,7 @@ impl App {
             comments: HashMap::new(),
             team_meta: HashMap::new(),
             query: String::new(),
+            workspace: default_workspace,
             project: None,
             visible: Vec::new(),
             table: TableState::default(),
@@ -383,7 +385,6 @@ impl App {
                     self.workspaces[workspace].load = WorkspaceLoad::Ready {
                         client,
                         viewer: snapshot.viewer,
-                        organization: snapshot.organization,
                         teams: snapshot.teams,
                     };
                     self.comments.retain(|key, _| key.workspace != workspace);
@@ -515,6 +516,7 @@ impl App {
         let mut projects: Vec<&str> = self
             .entries
             .iter()
+            .filter(|e| e.workspace == self.workspace)
             .filter_map(|e| e.issue.project.as_deref())
             .collect();
         projects.sort_unstable();
@@ -527,6 +529,9 @@ impl App {
         let mut buffer = Vec::new();
         let mut scored: Vec<(usize, u32)> = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
+            if entry.workspace != self.workspace {
+                continue;
+            }
             if self
                 .project
                 .as_deref()
@@ -591,8 +596,26 @@ impl App {
         )
     }
 
-    pub fn multi_workspace(&self) -> bool {
-        self.workspaces.len() > 1
+    pub fn workspace_issue_count(&self, workspace: usize) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.workspace == workspace)
+            .count()
+    }
+
+    fn switch_workspace(&mut self, forward: bool) {
+        let count = self.workspaces.len();
+        if count < 2 {
+            return;
+        }
+        self.workspace = if forward {
+            (self.workspace + 1) % count
+        } else {
+            (self.workspace + count - 1) % count
+        };
+        self.project = None;
+        self.detail_scroll = 0;
+        self.recompute(None);
     }
 
     fn select_by(&mut self, delta: isize) {
@@ -661,6 +684,8 @@ impl App {
             KeyCode::Down => self.select_by(1),
             KeyCode::PageUp => self.select_by(-10),
             KeyCode::PageDown => self.select_by(10),
+            KeyCode::Tab => self.switch_workspace(true),
+            KeyCode::BackTab => self.switch_workspace(false),
             KeyCode::Enter => self.open_dispatch(),
             KeyCode::Esc => {
                 if !self.query.is_empty() {
@@ -1113,38 +1138,28 @@ impl App {
     }
 
     fn open_team_picker(&mut self) {
-        let multi = self.multi_workspace();
-        let items: Vec<PickerItem> = self
-            .workspaces
-            .iter()
-            .enumerate()
-            .filter_map(|(index, w)| match &w.load {
-                WorkspaceLoad::Ready {
-                    teams,
-                    organization,
-                    ..
-                } => Some(teams.iter().map(move |t| PickerItem {
+        let workspace = self.workspace;
+        let items: Vec<PickerItem> = match &self.workspaces[workspace].load {
+            WorkspaceLoad::Ready { teams, .. } => teams
+                .iter()
+                .map(|t| PickerItem {
                     label: format!("{} · {}", t.key, t.name),
-                    hint: if multi {
-                        organization.clone()
-                    } else {
-                        String::new()
-                    },
+                    hint: String::new(),
                     choice: Choice::Team {
-                        workspace: index,
+                        workspace,
                         team_id: t.id.clone(),
                         team_key: t.key.clone(),
                     },
-                })),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         if items.is_empty() {
             self.error("No teams loaded yet");
             return;
         }
-        self.mode = Mode::Picker(Picker::new("New issue in team", None, items));
+        let title = format!("New issue in {}", self.workspaces[workspace].name);
+        self.mode = Mode::Picker(Picker::new(title, None, items));
     }
 }
 

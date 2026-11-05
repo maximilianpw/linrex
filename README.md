@@ -4,7 +4,9 @@ A terminal UI for the Linear issues assigned to you across several Linear
 workspaces, with one [Rex](https://www.superlogical.com/rex) session per issue.
 
 The screen is a fuzzy-searchable list of your open issues above the selected
-issue's details. Start typing to search. Press Enter on an issue:
+issue's details, one Linear workspace at a time. It opens on
+`default_workspace` (or the first workspace in the config), and `tab` switches
+to the next. Start typing to search. Press Enter on an issue:
 
 - If a Rex session for it is already running, the Rex app switches to it.
 - Otherwise a dispatch screen opens. Pick the agent, the repo if several
@@ -59,12 +61,13 @@ Typing always edits the search, so commands use Ctrl.
 | --- | --- |
 | type, `backspace`, `ctrl-w` | Fuzzy search; `ctrl-w` deletes a word |
 | `↑` `↓`, `pgup` `pgdn` | Move |
+| `tab` `shift-tab` | Switch workspace |
 | `enter` | Switch to the issue's session, or open the dispatch screen |
 | `ctrl-s` `ctrl-t` `ctrl-p` | Set status, assignee, priority |
 | `ctrl-e` | Comment (`ctrl-s` sends) |
-| `ctrl-n` | New issue: pick a team, then the first line is the title (`ctrl-s` creates) |
+| `ctrl-n` | New issue in the current workspace: pick a team, then the first line is the title (`ctrl-s` creates) |
 | `ctrl-o` | Open in the browser |
-| `ctrl-f` | Cycle the project filter through your issues' projects |
+| `ctrl-f` | Cycle the project filter through the workspace's projects |
 | `ctrl-u` `ctrl-d` | Scroll the details |
 | `ctrl-r` | Reload |
 | `esc` | Clear the search, then the project filter, then quit |

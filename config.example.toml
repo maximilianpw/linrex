@@ -4,6 +4,10 @@
 # Default: .env next to this config. It must not be readable by others (chmod 600).
 # env_file = "~/.config/linrex/.env"
 
+# Workspace shown at startup (default: the first [[workspaces]] entry); tab
+# switches between workspaces.
+default_workspace = "work"
+
 [session]
 # Move Backlog/Todo/Triage issues to the team's first "started" state when a
 # session is created for them.

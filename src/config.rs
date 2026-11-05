@@ -9,6 +9,7 @@ use crate::checkout::{DEFAULT_NAMING, Repo, VcsChoice, validate_naming};
 
 #[derive(Debug)]
 pub struct Config {
+    pub default_workspace: usize,
     pub session: SessionConfig,
     pub agents: Vec<AgentConfig>,
     pub workspaces: Vec<WorkspaceConfig>,
@@ -20,6 +21,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     env_file: Option<PathBuf>,
+    default_workspace: Option<String>,
     #[serde(default)]
     session: SessionConfig,
     #[serde(default)]
@@ -217,7 +219,16 @@ impl Config {
         let env_file = raw.env_file.as_deref().map(expand_home).transpose()?;
         let default_naming = raw.checkouts.naming.as_deref().unwrap_or(DEFAULT_NAMING);
         validate_naming(default_naming)?;
+        let default_workspace = match &raw.default_workspace {
+            Some(name) => raw
+                .workspaces
+                .iter()
+                .position(|w| &w.name == name)
+                .with_context(|| format!("default_workspace names unknown workspace {name:?}"))?,
+            None => 0,
+        };
         let config = Self {
+            default_workspace,
             repos: raw
                 .repos
                 .into_iter()
@@ -471,6 +482,15 @@ mod tests {
             panic!("expected one repo");
         };
         assert_eq!(other.naming, "{repo}.{vcs}-{issue}");
+    }
+
+    #[test]
+    fn default_workspace_is_named_or_first() {
+        assert_eq!(parse(EXAMPLE).default_workspace, 0);
+        let named = format!("default_workspace = \"side\"\n{EXAMPLE}");
+        assert_eq!(parse(&named).default_workspace, 1);
+        let unknown = format!("default_workspace = \"nope\"\n{EXAMPLE}");
+        assert!(Config::parse(&unknown).is_err());
     }
 
     #[test]

@@ -24,7 +24,7 @@ const SESSION: Color = Color::Rgb(120, 200, 120);
 const SELECTED_BG: Color = Color::Rgb(45, 50, 70);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
-const MAIN_KEYS: &str = "↵ open · ^s status · ^t assign · ^p priority · ^e comment · ^n new · ^o browser · ^f project · ^u ^d scroll · ^r refresh · esc quit";
+const MAIN_KEYS: &str = "↵ open · tab workspace · ^s status · ^t assign · ^p priority · ^e comment · ^n new · ^o browser · ^f project · ^u ^d scroll · ^r refresh · esc quit";
 const DISPATCH_KEYS: &str =
     "↵ start · ↑↓ agent · tab repo · ^w checkout · alt-↵ newline · esc back";
 
@@ -96,10 +96,23 @@ fn separator() -> Span<'static> {
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) {
-    let mut spans = vec![
-        Span::styled(" linrex", Style::new().fg(ACCENT).bold()),
-        separator(),
-        Span::raw("my issues"),
+    let mut spans = vec![Span::styled(" linrex ", Style::new().fg(ACCENT).bold())];
+    for (index, workspace) in app.workspaces.iter().enumerate() {
+        let status = match &workspace.load {
+            WorkspaceLoad::Loading => SPINNER[frame_count % SPINNER.len()].to_owned(),
+            WorkspaceLoad::Ready { .. } => app.workspace_issue_count(index).to_string(),
+            WorkspaceLoad::Failed(_) => "✕".to_owned(),
+        };
+        let text = format!(" {} {status} ", workspace.name);
+        spans.push(if index == app.workspace {
+            Span::styled(text, Style::new().fg(Color::Black).bg(ACCENT).bold())
+        } else if matches!(workspace.load, WorkspaceLoad::Failed(_)) {
+            Span::styled(text, Style::new().fg(Color::Red))
+        } else {
+            Span::styled(text, Style::new().fg(DIM))
+        });
+    }
+    spans.extend([
         separator(),
         match &app.project {
             Some(project) => Span::styled(project.clone(), Style::new().fg(YELLOW).bold()),
@@ -107,20 +120,16 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) {
         },
         separator(),
         Span::styled(
-            format!("{}/{}", app.visible.len(), app.entries.len()),
+            format!(
+                "{}/{}",
+                app.visible.len(),
+                app.workspace_issue_count(app.workspace)
+            ),
             Style::new().fg(DIM),
         ),
-        separator(),
-    ];
-    for workspace in &app.workspaces {
-        let (marker, style) = match &workspace.load {
-            WorkspaceLoad::Loading => (SPINNER[frame_count % SPINNER.len()], Style::new().fg(DIM)),
-            WorkspaceLoad::Ready { .. } => ("●", Style::new().fg(SESSION)),
-            WorkspaceLoad::Failed(_) => ("✕", Style::new().fg(Color::Red)),
-        };
-        spans.push(Span::styled(format!("{marker} {} ", workspace.name), style));
-    }
+    ]);
     if app.busy > 0 {
+        spans.push(Span::raw(" "));
         spans.push(Span::styled(
             SPINNER[frame_count % SPINNER.len()],
             Style::new().fg(ACCENT),
@@ -147,13 +156,11 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     frame.render_widget(search_line, search);
 
-    let multi = app.multi_workspace();
     let rows: Vec<Row> = app
         .visible
         .iter()
         .map(|&index| {
-            let entry = &app.entries[index];
-            let issue = &entry.issue;
+            let issue = &app.entries[index].issue;
             let marker = if app.starting.contains(&issue.identifier) {
                 Span::styled("…", Style::new().fg(ACCENT))
             } else if app.session_for(issue).is_some() {
@@ -161,7 +168,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Span::raw(" ")
             };
-            let mut cells = vec![
+            Row::new([
                 Cell::from(marker),
                 Cell::from(Span::styled(issue.identifier.clone(), Style::new().fg(DIM))),
                 Cell::from(Span::styled(
@@ -170,36 +177,23 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 )),
                 Cell::from(priority_span(issue.priority)),
                 Cell::from(issue.title.clone()),
-            ];
-            if multi {
-                cells.push(Cell::from(
-                    Span::raw(app.workspaces[entry.workspace].name.clone()).fg(DIM),
-                ));
-            }
-            Row::new(cells)
+            ])
         })
         .collect();
-    let mut widths = vec![
+    let widths = [
         Constraint::Length(1),
         Constraint::Length(9),
         Constraint::Length(12),
         Constraint::Length(2),
         Constraint::Fill(1),
     ];
-    if multi {
-        widths.push(Constraint::Length(8));
-    }
     let empty = app.visible.is_empty();
     let table = Table::new(rows, widths)
         .column_spacing(1)
         .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD));
     frame.render_stateful_widget(table, rows_area, &mut app.table);
     if empty {
-        let loading = app
-            .workspaces
-            .iter()
-            .any(|w| matches!(w.load, WorkspaceLoad::Loading));
-        let message = if loading {
+        let message = if matches!(app.workspaces[app.workspace].load, WorkspaceLoad::Loading) {
             "Loading your issues…"
         } else if !app.query.is_empty() || app.project.is_some() {
             "No issues match"
@@ -212,17 +206,14 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     let Some(entry) = app.selected() else {
-        let failures: Vec<Line> = app
-            .workspaces
-            .iter()
-            .filter_map(|w| match &w.load {
-                WorkspaceLoad::Failed(error) => {
-                    Some(Line::from(format!("{}: {error}", w.name)).fg(Color::Red))
-                }
-                _ => None,
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(failures).wrap(Wrap { trim: false }), area);
+        let workspace = &app.workspaces[app.workspace];
+        if let WorkspaceLoad::Failed(error) = &workspace.load {
+            frame.render_widget(
+                Paragraph::new(Line::from(format!("{}: {error}", workspace.name)).fg(Color::Red))
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
         return;
     };
     let inner = area.inner(ratatui::layout::Margin::new(1, 0));
@@ -234,7 +225,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn meta_line(app: &App, entry: &Entry) -> Line<'static> {
+fn meta_line(entry: &Entry) -> Line<'static> {
     let issue = &entry.issue;
     let mut spans = vec![
         Span::styled(
@@ -258,13 +249,6 @@ fn meta_line(app: &App, entry: &Entry) -> Line<'static> {
         spans.push(separator());
         spans.push(Span::styled(project.clone(), Style::new().fg(YELLOW)));
     }
-    if app.multi_workspace() {
-        spans.push(separator());
-        spans.push(Span::styled(
-            app.workspaces[entry.workspace].name.clone(),
-            Style::new().fg(DIM),
-        ));
-    }
     Line::from(spans)
 }
 
@@ -273,7 +257,7 @@ fn detail_text(app: &App, entry: &Entry) -> Text<'static> {
     let mut lines = vec![
         Line::from(issue.identifier.clone()).fg(DIM),
         Line::from(issue.title.clone()).bold(),
-        meta_line(app, entry),
+        meta_line(entry),
     ];
     if !issue.labels.is_empty() {
         let tags: Vec<String> = issue.labels.iter().map(|l| format!("#{l}")).collect();
