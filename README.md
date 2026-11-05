@@ -119,6 +119,13 @@ command = ["codex"]
 `LINREX_LINEAR_ENDPOINT` points the client at another GraphQL endpoint, such as
 a local mock for testing.
 
+## Inspiration
+
+The search-first layout and the dispatch screen come from
+[a tour of Alasdair Monk's issue review TUI](https://x.com/steveruizok/status/2118067375237186035),
+shared by [Steve Ruiz](https://x.com/steveruizok). linrex is an independent
+take on the idea.
+
 ## License
 
 MIT
