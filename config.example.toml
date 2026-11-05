@@ -1,0 +1,58 @@
+# Copy to ~/.config/linrex/config.toml (or set LINREX_CONFIG).
+
+# API keys are read from this file, or from the environment, which wins.
+# Default: .env next to this config. It must not be readable by others (chmod 600).
+# env_file = "~/.config/linrex/.env"
+
+[session]
+# The issue prompt (title, description, comments, URL, branch name) is
+# appended as the last argument.
+command = ["claude"]
+# Move Backlog/Todo/Triage issues to the team's first "started" state when a
+# session is created for them.
+move_to_started = true
+
+[checkouts]
+# Default name for new per-issue checkouts, created in each repo's
+# checkout_dir. {repo} is the repo name, {vcs} is "jj" or "git", {issue} is the
+# lowercased identifier.
+naming = "{repo}.{vcs}-{issue}"
+
+# One entry per Linear workspace. Each needs its own personal API key
+# (Linear → Settings → Security & access → Personal API keys), stored in the
+# env file under the variable named here.
+[[workspaces]]
+name = "work"
+api_key_env = "LINEAR_API_KEY_WORK"
+
+[[workspaces]]
+name = "personal"
+api_key_env = "LINEAR_API_KEY_PERSONAL"
+
+# Repos are matched to issues by project name first, then by team key. When
+# several repos match, Enter shows a picker.
+
+# A jj repo with defaults: jj workspaces named api.jj-<issue> next to it.
+[[repos]]
+path = "~/code/api"
+workspace = "work"
+teams = ["ENG"]
+
+# A git submodule whose checkouts live elsewhere: git worktrees named
+# web-app-<issue> in ~/code. Issues in the "Web app" project go here first.
+[[repos]]
+path = "~/code/platform/submodules/web"
+name = "web-app"
+checkout_dir = "~/code"
+naming = "{repo}-{issue}"
+vcs = "git"
+workspace = "work"
+teams = ["ENG"]
+projects = ["Web app"]
+
+# A plain folder: every issue's session starts in it.
+[[repos]]
+path = "~/notes"
+vcs = "none"
+workspace = "personal"
+teams = ["HOME"]
