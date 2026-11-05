@@ -12,8 +12,8 @@ use crate::issue_session::session_label;
 use crate::linear::Priority;
 
 use super::app::{
-    App, CheckoutPreview, Comments, Compose, Dispatch, Entry, Mode, NoticeKind, WorkspaceLoad,
-    describe_checkout, tilde,
+    App, CheckoutPreview, Comments, Compose, Dispatch, DispatchHitbox, Entry, Hitboxes, Mode,
+    NoticeKind, PickerHitbox, WorkspaceLoad, describe_checkout, tilde,
 };
 use super::picker::Picker;
 use super::theme;
@@ -51,11 +51,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
         Block::new().style(Style::new().bg(theme::BASE).fg(theme::TEXT)),
         frame.area(),
     );
-    draw_header(frame, app, header, frame_count);
+    app.hitboxes = Hitboxes::default();
+    app.hitboxes.tabs = draw_header(frame, app, header, frame_count);
     draw_footer(frame, app, footer, keys);
 
     if let Mode::Dispatch(dispatch) = &app.mode {
-        draw_dispatch(frame, app, dispatch, body);
+        let hit = draw_dispatch(frame, app, dispatch, body);
+        app.hitboxes.dispatch = hit;
         return;
     }
     let list_height = (app.visible.len() as u16 + 1).clamp(4, body.height * 45 / 100);
@@ -73,9 +75,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
         rule,
     );
     draw_detail(frame, app, detail);
+    app.hitboxes.detail = detail;
 
     match &app.mode {
-        Mode::Picker(picker) => draw_picker(frame, picker),
+        Mode::Picker(picker) => app.hitboxes.picker = Some(draw_picker(frame, picker)),
         Mode::Compose(compose, editor) => {
             let title = match compose {
                 Compose::Comment { identifier, .. } => format!(" Comment on {identifier} "),
@@ -101,8 +104,10 @@ fn separator() -> Span<'static> {
     Span::styled(" · ", Style::new().fg(DIM))
 }
 
-fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) {
+fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) -> Vec<(Rect, usize)> {
     let mut spans = vec![Span::styled(" linrex ", Style::new().fg(ACCENT).bold())];
+    let mut tabs = Vec::new();
+    let mut x = area.x + spans[0].width() as u16;
     for (index, workspace) in app.workspaces.iter().enumerate() {
         let status = match &workspace.load {
             WorkspaceLoad::Loading => SPINNER[frame_count % SPINNER.len()].to_owned(),
@@ -110,6 +115,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) {
             WorkspaceLoad::Failed(_) => "✕".to_owned(),
         };
         let text = format!(" {} {status} ", workspace.name);
+        let width = Span::raw(text.as_str()).width() as u16;
+        tabs.push((Rect::new(x, area.y, width, 1), index));
+        x += width;
         spans.push(if index == app.workspace {
             Span::styled(text, Style::new().fg(theme::CRUST).bg(ACCENT).bold())
         } else if matches!(workspace.load, WorkspaceLoad::Failed(_)) {
@@ -142,6 +150,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) {
         ));
     }
     frame.render_widget(Line::from(spans), area);
+    tabs
 }
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -198,6 +207,8 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .column_spacing(1)
         .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD));
     frame.render_stateful_widget(table, rows_area, &mut app.table);
+    app.hitboxes.list = rows_area;
+    app.hitboxes.list_offset = app.table.offset();
     if empty {
         let message = if matches!(app.workspaces[app.workspace].load, WorkspaceLoad::Loading) {
             "Loading your issues…"
@@ -335,10 +346,13 @@ fn session_line(app: &App, entry: &Entry) -> Line<'static> {
     ])
 }
 
-fn draw_dispatch(frame: &mut Frame, app: &App, dispatch: &Dispatch, area: Rect) {
-    let Some(entry) = app.entry(&dispatch.target) else {
-        return;
-    };
+fn draw_dispatch(
+    frame: &mut Frame,
+    app: &App,
+    dispatch: &Dispatch,
+    area: Rect,
+) -> Option<DispatchHitbox> {
+    let entry = app.entry(&dispatch.target)?;
     let issue = &entry.issue;
     let label_style = Style::new().fg(DIM);
     let label = |text: &str| Span::styled(format!("{text:<10}"), label_style);
@@ -354,6 +368,7 @@ fn draw_dispatch(frame: &mut Frame, app: &App, dispatch: &Dispatch, area: Rect) 
         ]),
         Line::default(),
     ];
+    let agents_line_index = lines.len() as u16;
     for (index, agent) in app.agents().iter().enumerate() {
         let chosen = index == dispatch.agent;
         lines.push(Line::from(vec![
@@ -387,6 +402,7 @@ fn draw_dispatch(frame: &mut Frame, app: &App, dispatch: &Dispatch, area: Rect) 
             Style::new().fg(DIM),
         ));
     }
+    let repo_line_index = lines.len() as u16;
     lines.push(Line::from(repo_line));
     if repo.vcs() == Vcs::None {
         lines.push(Line::from(vec![
@@ -443,6 +459,12 @@ fn draw_dispatch(frame: &mut Frame, app: &App, dispatch: &Dispatch, area: Rect) 
     let inner = block.inner(notes);
     frame.render_widget(block, notes);
     frame.render_widget(&dispatch.notes, inner);
+    let row = |line: u16, height: u16| Rect::new(info.x, info.y + line, info.width, height);
+    Some(DispatchHitbox {
+        agents: row(agents_line_index, app.agents().len() as u16),
+        repo: row(repo_line_index, 1),
+        checkout: row(repo_line_index + 1, 2),
+    })
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect, keys: &str) {
@@ -504,7 +526,7 @@ fn popup(area: Rect, width: u16, height: u16) -> Rect {
         .areas(area);
     area
 }
-fn draw_picker(frame: &mut Frame, picker: &Picker) {
+fn draw_picker(frame: &mut Frame, picker: &Picker) -> PickerHitbox {
     let matches = picker.matches();
     let height = (matches.len() as u16 + 4).clamp(6, 20);
     let area = popup(frame.area(), 60, height);
@@ -542,4 +564,9 @@ fn draw_picker(frame: &mut Frame, picker: &Picker) {
         list,
         &mut state,
     );
+    PickerHitbox {
+        popup: area,
+        list,
+        offset: state.offset(),
+    }
 }

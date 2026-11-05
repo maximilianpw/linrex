@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::TableState;
 use ratatui_textarea::TextArea;
 
@@ -22,6 +23,30 @@ use super::theme;
 
 const SESSION_POLL: Duration = Duration::from_secs(5);
 const DETAIL_PAGE: u16 = 10;
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const WHEEL_LINES: u16 = 3;
+
+#[derive(Default)]
+pub struct Hitboxes {
+    pub tabs: Vec<(Rect, usize)>,
+    pub list: Rect,
+    pub list_offset: usize,
+    pub detail: Rect,
+    pub picker: Option<PickerHitbox>,
+    pub dispatch: Option<DispatchHitbox>,
+}
+
+pub struct PickerHitbox {
+    pub popup: Rect,
+    pub list: Rect,
+    pub offset: usize,
+}
+
+pub struct DispatchHitbox {
+    pub agents: Rect,
+    pub repo: Rect,
+    pub checkout: Rect,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IssueKey {
@@ -213,6 +238,8 @@ pub struct App {
     pub busy: usize,
     pub starting: HashSet<String>,
     pub should_quit: bool,
+    pub hitboxes: Hitboxes,
+    last_click: Option<(Instant, usize)>,
     sender: Sender<Msg>,
     receiver: Receiver<Msg>,
     last_session_poll: Instant,
@@ -256,6 +283,8 @@ impl App {
             busy: 0,
             starting: HashSet::new(),
             should_quit: false,
+            hitboxes: Hitboxes::default(),
+            last_click: None,
             sender,
             receiver,
             last_session_poll: Instant::now(),
@@ -650,6 +679,136 @@ impl App {
             Mode::Compose(compose, editor) => self.on_compose_key(compose, editor, key),
             Mode::Dispatch(dispatch) => self.on_dispatch_key(dispatch, key),
         };
+    }
+
+    pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        let at = Position::new(mouse.column, mouse.row);
+        let mode = std::mem::replace(&mut self.mode, Mode::Normal);
+        self.mode = match mode {
+            Mode::Normal => {
+                self.on_main_mouse(mouse.kind, at);
+                return;
+            }
+            Mode::Picker(picker) => self.on_picker_mouse(picker, mouse.kind, at),
+            Mode::Dispatch(dispatch) => self.on_dispatch_mouse(dispatch, mouse.kind, at),
+            compose @ Mode::Compose(..) => compose,
+        };
+    }
+
+    fn on_main_mouse(&mut self, kind: MouseEventKind, at: Position) {
+        let in_list = self.hitboxes.list.contains(at);
+        let in_detail = self.hitboxes.detail.contains(at);
+        match kind {
+            MouseEventKind::ScrollDown if in_list => self.select_by(1),
+            MouseEventKind::ScrollUp if in_list => self.select_by(-1),
+            MouseEventKind::ScrollDown if in_detail => {
+                self.detail_scroll = self.detail_scroll.saturating_add(WHEEL_LINES)
+            }
+            MouseEventKind::ScrollUp if in_detail => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(WHEEL_LINES)
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(&(_, workspace)) = self
+                    .hitboxes
+                    .tabs
+                    .iter()
+                    .find(|(rect, _)| rect.contains(at))
+                {
+                    if workspace != self.workspace {
+                        self.workspace = workspace;
+                        self.project = None;
+                        self.detail_scroll = 0;
+                        self.recompute(None);
+                    }
+                    return;
+                }
+                if !in_list {
+                    return;
+                }
+                let row = self.hitboxes.list_offset + usize::from(at.y - self.hitboxes.list.y);
+                if row >= self.visible.len() {
+                    return;
+                }
+                let now = Instant::now();
+                let repeated = self.last_click.is_some_and(|(time, last)| {
+                    last == row && now.duration_since(time) <= DOUBLE_CLICK
+                });
+                if repeated {
+                    self.last_click = None;
+                    self.open_dispatch();
+                } else {
+                    self.last_click = Some((now, row));
+                    if self.table.selected() != Some(row) {
+                        self.table.select(Some(row));
+                        self.detail_scroll = 0;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_picker_mouse(&mut self, mut picker: Picker, kind: MouseEventKind, at: Position) -> Mode {
+        let Some(hit) = &self.hitboxes.picker else {
+            return Mode::Picker(picker);
+        };
+        match kind {
+            MouseEventKind::ScrollDown => picker.move_by(1),
+            MouseEventKind::ScrollUp => picker.move_by(-1),
+            MouseEventKind::Down(MouseButton::Left) if !hit.popup.contains(at) => {
+                return Mode::Normal;
+            }
+            MouseEventKind::Down(MouseButton::Left) if hit.list.contains(at) => {
+                let index = hit.offset + usize::from(at.y - hit.list.y);
+                if index < picker.matches().len() {
+                    picker.selected = index;
+                    if let Some(item) = picker.current() {
+                        let choice = item.choice.clone();
+                        return self.apply_choice(picker.target, choice);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Mode::Picker(picker)
+    }
+
+    fn on_dispatch_mouse(
+        &mut self,
+        mut dispatch: Box<Dispatch>,
+        kind: MouseEventKind,
+        at: Position,
+    ) -> Mode {
+        let (Some(hit), Some(issue)) = (
+            &self.hitboxes.dispatch,
+            self.entry(&dispatch.target).map(|e| e.issue.clone()),
+        ) else {
+            return Mode::Dispatch(dispatch);
+        };
+        let agents = self.config.agents.len();
+        match kind {
+            MouseEventKind::ScrollDown if hit.agents.contains(at) => {
+                dispatch.agent = (dispatch.agent + 1).min(agents - 1);
+            }
+            MouseEventKind::ScrollUp if hit.agents.contains(at) => {
+                dispatch.agent = dispatch.agent.saturating_sub(1);
+            }
+            MouseEventKind::Down(MouseButton::Left) if hit.agents.contains(at) => {
+                dispatch.agent = usize::from(at.y - hit.agents.y).min(agents - 1);
+            }
+            MouseEventKind::Down(MouseButton::Left) if hit.repo.contains(at) => {
+                dispatch.repo = (dispatch.repo + 1) % dispatch.repos.len();
+                dispatch.replan(&issue);
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if hit.checkout.contains(at) && dispatch.repo().vcs() != Vcs::None =>
+            {
+                dispatch.per_issue_checkout = !dispatch.per_issue_checkout;
+                dispatch.replan(&issue);
+            }
+            _ => {}
+        }
+        Mode::Dispatch(dispatch)
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {

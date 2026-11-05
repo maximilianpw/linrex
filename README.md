@@ -83,6 +83,12 @@ On the dispatch screen:
 | type, `alt-enter` | Notes for the agent; `alt-enter` adds a line |
 | `esc` | Back |
 
+The mouse works too: click an issue to select it, double-click to open it,
+scroll the list or the details with the wheel, click a workspace in the header
+to switch to it, and click entries in pickers and on the dispatch screen. While
+linrex captures the mouse, hold your terminal's selection modifier (often
+Shift or Option) to select text.
+
 The `●` next to an issue means a Rex session for it is running. Sessions are
 re-read every 5 seconds.
 
