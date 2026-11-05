@@ -16,12 +16,13 @@ use super::app::{
     describe_checkout, tilde,
 };
 use super::picker::Picker;
+use super::theme;
 
-const ACCENT: Color = Color::Rgb(122, 162, 247);
-const YELLOW: Color = Color::Rgb(230, 200, 100);
-const DIM: Color = Color::Rgb(110, 115, 135);
-const SESSION: Color = Color::Rgb(120, 200, 120);
-const SELECTED_BG: Color = Color::Rgb(45, 50, 70);
+const ACCENT: Color = theme::MAUVE;
+const YELLOW: Color = theme::YELLOW;
+const DIM: Color = theme::OVERLAY1;
+const SESSION: Color = theme::GREEN;
+const SELECTED_BG: Color = theme::SURFACE0;
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 const MAIN_KEYS: &str = "↵ open · tab workspace · ^s status · ^t assign · ^p priority · ^e comment · ^n new · ^o browser · ^f project · ^u ^d scroll · ^r refresh · esc quit";
@@ -46,6 +47,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
         Constraint::Length(key_lines + notice_lines),
     ])
     .areas(frame.area());
+    frame.render_widget(
+        Block::new().style(Style::new().bg(theme::BASE).fg(theme::TEXT)),
+        frame.area(),
+    );
     draw_header(frame, app, header, frame_count);
     draw_footer(frame, app, footer, keys);
 
@@ -79,6 +84,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
             let area = popup(frame.area(), 70, 14);
             frame.render_widget(Clear, area);
             let block = Block::bordered()
+                .style(Style::new().bg(theme::MANTLE).fg(theme::TEXT))
                 .border_type(BorderType::Rounded)
                 .border_style(Style::new().fg(ACCENT))
                 .title(title)
@@ -105,9 +111,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, frame_count: usize) {
         };
         let text = format!(" {} {status} ", workspace.name);
         spans.push(if index == app.workspace {
-            Span::styled(text, Style::new().fg(Color::Black).bg(ACCENT).bold())
+            Span::styled(text, Style::new().fg(theme::CRUST).bg(ACCENT).bold())
         } else if matches!(workspace.load, WorkspaceLoad::Failed(_)) {
-            Span::styled(text, Style::new().fg(Color::Red))
+            Span::styled(text, Style::new().fg(theme::RED))
         } else {
             Span::styled(text, Style::new().fg(DIM))
         });
@@ -173,7 +179,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(Span::styled(issue.identifier.clone(), Style::new().fg(DIM))),
                 Cell::from(Span::styled(
                     issue.state.name.clone(),
-                    Style::new().fg(hex_color(&issue.state.color)),
+                    Style::new().fg(theme::status_color(&issue.state.color)),
                 )),
                 Cell::from(priority_span(issue.priority)),
                 Cell::from(issue.title.clone()),
@@ -209,7 +215,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         let workspace = &app.workspaces[app.workspace];
         if let WorkspaceLoad::Failed(error) = &workspace.load {
             frame.render_widget(
-                Paragraph::new(Line::from(format!("{}: {error}", workspace.name)).fg(Color::Red))
+                Paragraph::new(Line::from(format!("{}: {error}", workspace.name)).fg(theme::RED))
                     .wrap(Wrap { trim: false }),
                 area,
             );
@@ -230,7 +236,9 @@ fn meta_line(entry: &Entry) -> Line<'static> {
     let mut spans = vec![
         Span::styled(
             issue.state.name.clone(),
-            Style::new().fg(hex_color(&issue.state.color)).bold(),
+            Style::new()
+                .fg(theme::status_color(&issue.state.color))
+                .bold(),
         ),
         separator(),
         Span::styled(issue.priority.label(), Style::new().fg(DIM)),
@@ -298,7 +306,7 @@ fn detail_text(app: &App, entry: &Entry) -> Text<'static> {
             }
         }
         Some(Comments::Failed(error)) => {
-            lines.push(Line::from(format!("Comments: {error}")).fg(Color::Red))
+            lines.push(Line::from(format!("Comments: {error}")).fg(theme::RED))
         }
         Some(Comments::Loading) | None => lines.push(Line::from("Loading comments…").fg(DIM)),
     }
@@ -428,6 +436,7 @@ fn draw_dispatch(frame: &mut Frame, app: &App, dispatch: &Dispatch, area: Rect) 
         .areas(area.inner(ratatui::layout::Margin::new(1, 0)));
     frame.render_widget(Paragraph::new(lines), info);
     let block = Block::bordered()
+        .style(Style::new().bg(theme::MANTLE).fg(theme::TEXT))
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(ACCENT))
         .title(" Notes for the agent (optional) ");
@@ -440,8 +449,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, keys: &str) {
     let mut lines = Vec::new();
     if let Some(notice) = &app.notice {
         let color = match notice.kind {
-            NoticeKind::Info => ACCENT,
-            NoticeKind::Error => Color::Red,
+            NoticeKind::Info => theme::BLUE,
+            NoticeKind::Error => theme::RED,
         };
         lines.push(Line::from(format!(" {}", notice.text)).fg(color));
     }
@@ -451,22 +460,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, keys: &str) {
 
 fn priority_span(priority: Priority) -> Span<'static> {
     match priority {
-        Priority::Urgent => Span::styled("!!", Style::new().fg(Color::Red).bold()),
-        Priority::High => Span::styled("▲ ", Style::new().fg(Color::Rgb(240, 150, 80))),
-        Priority::Medium => Span::styled("■ ", Style::new().fg(Color::Rgb(200, 200, 120))),
+        Priority::Urgent => Span::styled("!!", Style::new().fg(theme::RED).bold()),
+        Priority::High => Span::styled("▲ ", Style::new().fg(theme::PEACH)),
+        Priority::Medium => Span::styled("■ ", Style::new().fg(theme::YELLOW)),
         Priority::Low => Span::styled("▼ ", Style::new().fg(DIM)),
         Priority::None => Span::styled("  ", Style::new()),
-    }
-}
-fn hex_color(hex: &str) -> Color {
-    let hex = hex.trim_start_matches('#');
-    match (
-        u8::from_str_radix(hex.get(0..2).unwrap_or(""), 16),
-        u8::from_str_radix(hex.get(2..4).unwrap_or(""), 16),
-        u8::from_str_radix(hex.get(4..6).unwrap_or(""), 16),
-    ) {
-        (Ok(r), Ok(g), Ok(b)) => Color::Rgb(r, g, b),
-        _ => Color::Gray,
     }
 }
 fn markdown_lines(text: &str) -> Vec<Line<'static>> {
@@ -478,10 +476,12 @@ fn markdown_lines(text: &str) -> Vec<Line<'static>> {
                 return Line::from(line.to_owned()).fg(DIM);
             }
             if in_code {
-                return Line::from(line.to_owned()).fg(Color::Rgb(180, 190, 140));
+                return Line::from(line.to_owned()).fg(theme::GREEN);
             }
             if line.starts_with('#') {
-                return Line::from(line.trim_start_matches('#').trim().to_owned()).bold();
+                return Line::from(line.trim_start_matches('#').trim().to_owned())
+                    .fg(theme::LAVENDER)
+                    .bold();
             }
             if let Some(rest) = line
                 .trim_start()
@@ -510,6 +510,7 @@ fn draw_picker(frame: &mut Frame, picker: &Picker) {
     let area = popup(frame.area(), 60, height);
     frame.render_widget(Clear, area);
     let block = Block::bordered()
+        .style(Style::new().bg(theme::MANTLE).fg(theme::TEXT))
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(ACCENT))
         .title(format!(" {} ", picker.title));
@@ -527,15 +528,17 @@ fn draw_picker(frame: &mut Frame, picker: &Picker) {
     let items: Vec<ListItem> = matches
         .iter()
         .map(|item| {
+            let label_style = item.color.map_or(Style::new(), |c| Style::new().fg(c));
             ListItem::new(Line::from(vec![
-                Span::raw(item.label.clone()),
+                Span::styled(if item.current { "● " } else { "  " }, label_style),
+                Span::styled(item.label.clone(), label_style),
                 Span::raw(format!("  {}", item.hint)).fg(DIM),
             ]))
         })
         .collect();
     let mut state = ListState::default().with_selected(Some(picker.selected));
     frame.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(Color::Rgb(45, 50, 70)).bold()),
+        List::new(items).highlight_style(Style::new().bg(SELECTED_BG).fg(theme::TEXT).bold()),
         list,
         &mut state,
     );

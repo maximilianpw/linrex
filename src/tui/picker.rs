@@ -1,3 +1,5 @@
+use ratatui::style::Color;
+
 use crate::linear::Priority;
 
 use super::app::IssueKey;
@@ -19,6 +21,8 @@ pub struct PickerItem {
     pub label: String,
     pub hint: String,
     pub choice: Choice,
+    pub color: Option<Color>,
+    pub current: bool,
 }
 
 #[derive(Debug)]

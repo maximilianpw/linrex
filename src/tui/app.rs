@@ -18,6 +18,7 @@ use crate::linear::{
 use crate::rex::{Rex, RexSession};
 
 use super::picker::{Choice, Picker, PickerItem};
+use super::theme;
 
 const SESSION_POLL: Duration = Duration::from_secs(5);
 const DETAIL_PAGE: u16 = 10;
@@ -858,9 +859,7 @@ impl App {
                 team_id,
                 team_key,
             } => {
-                let mut editor = TextArea::default();
-                editor
-                    .set_placeholder_text("First line is the title; the rest is the description.");
+                let editor = theme::editor("First line is the title; the rest is the description.");
                 return Mode::Compose(
                     Compose::NewIssue {
                         workspace,
@@ -946,8 +945,7 @@ impl App {
             ));
             return;
         }
-        let mut notes = TextArea::default();
-        notes.set_placeholder_text(
+        let notes = theme::editor(
             "Anything the issue doesn't say: approach, files to look at, constraints…",
         );
         let mut dispatch = Dispatch {
@@ -1067,6 +1065,8 @@ impl App {
                 label: s.name.clone(),
                 hint: format!("{:?}", s.kind).to_lowercase(),
                 choice: Choice::State(s.id.clone()),
+                color: Some(theme::status_color(&s.color)),
+                current: current.as_ref() == Some(&s.id),
             })
             .collect();
         let selected = items
@@ -1093,6 +1093,8 @@ impl App {
             label: "Unassigned".into(),
             hint: String::new(),
             choice: Choice::Assignee(None),
+            color: None,
+            current: false,
         }];
         items.extend(meta.members.iter().map(|m| PickerItem {
             label: m.display_name.clone(),
@@ -1102,6 +1104,8 @@ impl App {
                 String::new()
             },
             choice: Choice::Assignee(Some(m.id.clone())),
+            color: None,
+            current: false,
         }));
         if let Some(me) = items.iter().position(|i| i.hint == "me") {
             let item = items.remove(me);
@@ -1121,6 +1125,8 @@ impl App {
                 label: p.label().into(),
                 hint: String::new(),
                 choice: Choice::Priority(p),
+                color: None,
+                current: false,
             })
             .collect();
         self.mode = Mode::Picker(Picker::new("Priority", Some(key), items));
@@ -1132,8 +1138,7 @@ impl App {
         };
         let target = entry.key();
         let identifier = entry.issue.identifier.clone();
-        let mut editor = TextArea::default();
-        editor.set_placeholder_text("Write a comment (Markdown)");
+        let editor = theme::editor("Write a comment (Markdown)");
         self.mode = Mode::Compose(Compose::Comment { target, identifier }, Box::new(editor));
     }
 
@@ -1150,6 +1155,8 @@ impl App {
                         team_id: t.id.clone(),
                         team_key: t.key.clone(),
                     },
+                    color: None,
+                    current: false,
                 })
                 .collect(),
             _ => Vec::new(),

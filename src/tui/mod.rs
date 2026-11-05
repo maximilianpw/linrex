@@ -1,5 +1,6 @@
 mod app;
 mod picker;
+mod theme;
 mod view;
 
 use std::time::Duration;
