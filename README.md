@@ -31,6 +31,7 @@ one of its `projects` equals the issue's project, or else when one of its
 | --- | --- |
 | Has `.jj` (or `vcs = "jj"`) | `jj workspace add` at `trunk()`, named after the issue |
 | Git (or `vcs = "git"`) | Reuses any worktree already on Linear's branch for the issue; otherwise `git worktree add -b <branch>` from `origin/HEAD` (or `HEAD`) |
+| `create = [...]` | Whatever [your command](#workspaces-from-your-own-command) creates, run inside the issue's session |
 | Neither (or `vcs = "none"`) | The folder itself, shared by all issues |
 
 Checkouts are created in `checkout_dir` (default: the repo's parent) and named
@@ -52,6 +53,35 @@ Each workspace needs its own personal Linear API key. Its `api_key_env` names a
 variable that linrex reads from the environment or, if unset there, from the
 `.env` file next to the config (`env_file` changes the path). linrex refuses an
 env file that other users can read.
+
+### Workspaces from your own command
+
+If another tool creates your workspaces, for example one that branches several
+repos of a stack at once, give the repo a `create` command instead of a `vcs`:
+
+```toml
+[[repos]]
+path = "~/code/stack"
+create = ["stack-tool", "new", "{issue}", "{branch_words}"]
+checkout_dir = "~/code/stack/workspaces"
+teams = ["ENG"]
+```
+
+The issue's Rex session runs the command in its first window, so its prompts
+and progress are visible, then starts the agent in `checkout_dir/<naming>`
+(`naming` defaults to `{issue}`, e.g. `~/code/stack/workspaces/eng-123`). The
+command must create that folder. An existing folder is reused without running
+the command. If the command fails, the window stays open in a shell and the
+agent is not started.
+
+| Placeholder | Value |
+| --- | --- |
+| `{issue}` | Lowercased identifier, `eng-123` |
+| `{identifier}` | `ENG-123` |
+| `{branch}` | Linear's branch name, `sam/eng-123-fix-login-redirect` |
+| `{branch_words}` | The branch name's words after the identifier as separate arguments: `fix` `login` `redirect` |
+| `{title}` | The issue title |
+| `{dir}` | The folder the agent starts in |
 
 ## Keys
 

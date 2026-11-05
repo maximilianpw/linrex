@@ -4,6 +4,7 @@ mod issue_session;
 mod linear;
 mod rex;
 mod tui;
+mod workspace_command;
 
 use std::path::PathBuf;
 

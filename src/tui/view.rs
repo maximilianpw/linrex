@@ -424,7 +424,8 @@ fn draw_dispatch(
                 "per-issue {}",
                 match repo.vcs() {
                     Vcs::Jj => "jj workspace",
-                    _ => "git worktree",
+                    Vcs::Command => "workspace",
+                    Vcs::Git | Vcs::None => "git worktree",
                 }
             )),
             Span::styled("  ^w toggles", Style::new().fg(DIM)),
@@ -440,6 +441,15 @@ fn draw_dispatch(
                 Style::new().fg(DIM),
             ),
         ]));
+        if repo.vcs() == Vcs::Command && dispatch.per_issue_checkout && dispatch.checkout.created {
+            lines.push(Line::from(vec![
+                label(""),
+                Span::styled(
+                    format!("    created in the session by {}", repo.create.join(" ")),
+                    Style::new().fg(DIM),
+                ),
+            ]));
+        }
     }
     if app.moves_to_started() && issue.state.kind.is_not_started() {
         lines.push(Line::from(vec![

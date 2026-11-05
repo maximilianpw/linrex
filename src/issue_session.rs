@@ -3,9 +3,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::checkout::{Checkout, CheckoutRequest, Repo, ensure_checkout};
+use crate::checkout::{Checkout, CheckoutRequest, Repo, Vcs, ensure_checkout};
 use crate::linear::{Comment, Issue, IssueUpdate, LinearClient};
 use crate::rex::{NewSession, Rex, RexSession};
+use crate::workspace_command;
 
 pub fn session_prefix(identifier: &str) -> String {
     identifier.to_ascii_lowercase()
@@ -158,11 +159,26 @@ pub fn start(
         .context("could not load the issue's comments")?;
     let mut command = options.command.to_vec();
     command.push(issue_prompt(issue, &comments, options.notes));
+    let (cwd, command) = if checkout.vcs == Vcs::Command && options.per_issue_checkout {
+        let create = workspace_command::expand(
+            &options.repo.create,
+            &workspace_command::Values {
+                identifier: &issue.identifier,
+                branch: &issue.branch_name,
+                title: &issue.title,
+                dir: &checkout.path,
+            },
+        );
+        let command = workspace_command::session_command(&create, &checkout.path, &command);
+        (options.repo.path.as_path(), command)
+    } else {
+        (checkout.path.as_path(), command)
+    };
 
     let label = session_label(issue);
     let session_id = rex.create_session(&NewSession {
         label: &label,
-        cwd: &checkout.path,
+        cwd,
         window: &issue.identifier,
         command: &command,
     })?;

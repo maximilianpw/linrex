@@ -10,6 +10,7 @@ pub const DEFAULT_NAMING: &str = "{repo}.{vcs}-{issue}";
 pub enum Vcs {
     Jj,
     Git,
+    Command,
     None,
 }
 
@@ -18,6 +19,7 @@ impl Vcs {
         match self {
             Self::Jj => "jj",
             Self::Git => "git",
+            Self::Command => "command",
             Self::None => "folder",
         }
     }
@@ -50,6 +52,7 @@ pub struct Repo {
     pub checkout_dir: PathBuf,
     pub naming: String,
     pub vcs: VcsChoice,
+    pub create: Vec<String>,
 }
 
 impl Repo {
@@ -64,10 +67,14 @@ impl Repo {
             checkout_dir,
             naming: DEFAULT_NAMING.into(),
             vcs: VcsChoice::Auto,
+            create: Vec::new(),
         }
     }
 
     pub fn vcs(&self) -> Vcs {
+        if !self.create.is_empty() {
+            return Vcs::Command;
+        }
         match self.vcs {
             VcsChoice::Auto => Vcs::detect(&self.path),
             VcsChoice::Jj => Vcs::Jj,
@@ -78,8 +85,9 @@ impl Repo {
 
     pub fn checkout_path(&self, issue: &str) -> PathBuf {
         let vcs = self.vcs();
-        if vcs == Vcs::None {
-            return self.path.clone();
+        match vcs {
+            Vcs::None => return self.path.clone(),
+            Vcs::Jj | Vcs::Git | Vcs::Command => {}
         }
         let name = self
             .naming
@@ -140,7 +148,7 @@ pub fn planned_checkout(repo: &Repo, request: &CheckoutRequest<'_>) -> Checkout 
     let vcs = repo.vcs();
     let existing = match vcs {
         Vcs::Git => git_worktree_on_branch(&repo.path, request.branch),
-        Vcs::Jj | Vcs::None => None,
+        Vcs::Jj | Vcs::Command | Vcs::None => None,
     };
     let path = existing.unwrap_or_else(|| repo.checkout_path(request.issue));
     let created = vcs != Vcs::None && !path.is_dir();
@@ -156,6 +164,9 @@ pub fn ensure_checkout(repo: &Repo, request: &CheckoutRequest<'_>) -> Result<Che
         match checkout.vcs {
             Vcs::Jj => add_jj_workspace(&repo.path, request, &checkout.path)?,
             Vcs::Git => add_git_worktree(&repo.path, request, &checkout.path)?,
+            // The create command runs inside the issue's Rex session, where its
+            // prompts and progress are visible; see workspace_command.
+            Vcs::Command => {}
             Vcs::None => unreachable!("plain folders are never created"),
         }
     }

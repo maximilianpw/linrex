@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::checkout::{DEFAULT_NAMING, Repo, VcsChoice, validate_naming};
+use crate::workspace_command;
 
 #[derive(Debug)]
 pub struct Config {
@@ -135,6 +136,8 @@ struct RawRepoConfig {
     naming: Option<String>,
     #[serde(default)]
     vcs: VcsChoice,
+    #[serde(default)]
+    create: Vec<String>,
     workspace: Option<String>,
     #[serde(default)]
     teams: Vec<String>,
@@ -145,8 +148,23 @@ struct RawRepoConfig {
 impl RepoConfig {
     fn resolve(raw: RawRepoConfig, default_naming: &str) -> Result<Self> {
         let defaults = Repo::at(expand_home(&raw.path)?);
-        let naming = raw.naming.unwrap_or_else(|| default_naming.to_owned());
-        validate_naming(&naming).with_context(|| format!("repo {}", defaults.path.display()))?;
+        let context = || format!("repo {}", defaults.path.display());
+        let created_by_command = !raw.create.is_empty();
+        if created_by_command {
+            workspace_command::validate(&raw.create).with_context(context)?;
+            if raw.vcs != VcsChoice::Auto {
+                bail!("{}: set either create or vcs, not both", context());
+            }
+        }
+        let naming = raw.naming.unwrap_or_else(|| {
+            if created_by_command {
+                "{issue}"
+            } else {
+                default_naming
+            }
+            .to_owned()
+        });
+        validate_naming(&naming).with_context(context)?;
         let checkout_dir = match raw.checkout_dir {
             Some(dir) => expand_home(&dir)?,
             None => defaults.checkout_dir.clone(),
@@ -157,6 +175,7 @@ impl RepoConfig {
                 checkout_dir,
                 naming,
                 vcs: raw.vcs,
+                create: raw.create,
                 ..defaults
             },
             workspace: raw.workspace,
@@ -491,6 +510,30 @@ mod tests {
         assert_eq!(parse(&named).default_workspace, 1);
         let unknown = format!("default_workspace = \"nope\"\n{EXAMPLE}");
         assert!(Config::parse(&unknown).is_err());
+    }
+
+    #[test]
+    fn create_command_repos_name_workspaces_after_the_issue() {
+        let config = parse(
+            r#"
+            [[workspaces]]
+            name = "work"
+            api_key_env = "X"
+            [[repos]]
+            path = "/w/stack"
+            create = ["tool", "new", "{issue}", "{branch_words}"]
+            checkout_dir = "/w/stack/ws"
+            teams = ["ENG"]
+            "#,
+        );
+        let RepoMatch::One(repo) = config.repo_for("work", "ENG", None) else {
+            panic!("expected one repo");
+        };
+        assert_eq!(repo.vcs(), crate::checkout::Vcs::Command);
+        assert_eq!(repo.checkout_path("eng-9"), Path::new("/w/stack/ws/eng-9"));
+        let base = "[[workspaces]]\nname = \"a\"\napi_key_env = \"X\"\n[[repos]]\npath = \"/r\"\n";
+        assert!(Config::parse(&format!("{base}create = [\"t\", \"{{nope}}\"]")).is_err());
+        assert!(Config::parse(&format!("{base}create = [\"t\"]\nvcs = \"git\"")).is_err());
     }
 
     #[test]
