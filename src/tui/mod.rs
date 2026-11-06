@@ -27,11 +27,16 @@ pub fn run(config: Config) -> Result<()> {
             app.tick();
             terminal.draw(|frame| view::draw(frame, &mut app, frame_count))?;
             frame_count = frame_count.wrapping_add(1);
-            if event::poll(Duration::from_millis(120))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
-                    Event::Mouse(mouse) => app.on_mouse(mouse),
-                    _ => {}
+            if event::poll(Duration::from_millis(50))? {
+                loop {
+                    match event::read()? {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+                        Event::Mouse(mouse) => app.on_mouse(mouse),
+                        _ => {}
+                    }
+                    if app.should_quit || !event::poll(Duration::ZERO)? {
+                        break;
+                    }
                 }
             }
         }

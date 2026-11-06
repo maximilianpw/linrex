@@ -25,6 +25,7 @@ const SESSION_POLL: Duration = Duration::from_secs(5);
 const DETAIL_PAGE: u16 = 10;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const WHEEL_LINES: u16 = 3;
+const SELECTION_SETTLE: Duration = Duration::from_millis(120);
 
 #[derive(Default)]
 pub struct Hitboxes {
@@ -185,6 +186,7 @@ enum Msg {
         result: JobResult<Box<(LinearClient, WorkspaceSnapshot)>>,
     },
     Sessions(JobResult<Vec<RexSession>>),
+    CheckoutPreview(CheckoutPreview),
     Comments {
         key: IssueKey,
         result: JobResult<Vec<Comment>>,
@@ -233,6 +235,9 @@ pub struct App {
     pub table: TableState,
     pub detail_scroll: u16,
     pub checkout_preview: Option<CheckoutPreview>,
+    preview_requested: Option<IssueKey>,
+    settled_selection: Option<IssueKey>,
+    selection_changed_at: Instant,
     pub mode: Mode,
     pub notice: Option<Notice>,
     pub busy: usize,
@@ -278,6 +283,9 @@ impl App {
             table: TableState::default(),
             detail_scroll: 0,
             checkout_preview: None,
+            preview_requested: None,
+            settled_selection: None,
+            selection_changed_at: Instant::now(),
             mode: Mode::Normal,
             notice: None,
             busy: 0,
@@ -372,8 +380,15 @@ impl App {
         if self.last_session_poll.elapsed() >= SESSION_POLL {
             self.poll_sessions();
         }
-        self.ensure_comments();
-        self.ensure_checkout_preview();
+        let selected = self.selected_key();
+        if selected != self.settled_selection {
+            self.settled_selection = selected;
+            self.selection_changed_at = Instant::now();
+        }
+        if self.selection_changed_at.elapsed() >= SELECTION_SETTLE {
+            self.ensure_comments();
+            self.ensure_checkout_preview();
+        }
     }
 
     fn ensure_checkout_preview(&mut self) {
@@ -381,22 +396,34 @@ impl App {
             return;
         };
         let key = entry.key();
-        if matches!(&self.checkout_preview, Some(CheckoutPreview { key: k, .. }) if *k == key) {
+        let shown = matches!(&self.checkout_preview, Some(preview) if preview.key == key);
+        if shown || self.preview_requested.as_ref() == Some(&key) {
             return;
         }
         let RepoMatch::One(repo) = self.repo_match(entry) else {
             return;
         };
-        let checkout = planned_checkout(
-            repo,
-            &CheckoutRequest {
-                identifier: &entry.issue.identifier,
-                title: &entry.issue.title,
-                branch: &entry.issue.branch_name,
-            },
+        let repo = repo.clone();
+        let (identifier, title, branch) = (
+            entry.issue.identifier.clone(),
+            entry.issue.title.clone(),
+            entry.issue.branch_name.clone(),
         );
-        let text = describe_checkout(&checkout);
-        self.checkout_preview = Some(CheckoutPreview { key, text });
+        self.preview_requested = Some(key.clone());
+        self.spawn(move || {
+            let checkout = planned_checkout(
+                &repo,
+                &CheckoutRequest {
+                    identifier: &identifier,
+                    title: &title,
+                    branch: &branch,
+                },
+            );
+            Msg::CheckoutPreview(CheckoutPreview {
+                key,
+                text: describe_checkout(&checkout),
+            })
+        });
     }
 
     fn handle(&mut self, msg: Msg) {
@@ -428,6 +455,12 @@ impl App {
                     }
                 }
             },
+            Msg::CheckoutPreview(preview) => {
+                if self.preview_requested.as_ref() == Some(&preview.key) {
+                    self.preview_requested = None;
+                }
+                self.checkout_preview = Some(preview);
+            }
             Msg::Sessions(Ok(sessions)) => self.sessions = sessions,
             Msg::Sessions(Err(error)) => self.error(error),
             Msg::Comments { key, result } => {
