@@ -1,6 +1,6 @@
 [package]
 name = "linrex"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Terminal UI for Linear issues across workspaces, with a Rex session per issue"
 license = "MIT"
