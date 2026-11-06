@@ -4,6 +4,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::workspace_command;
+
 pub const DEFAULT_NAMING: &str = "{repo}.{vcs}-{issue}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +55,7 @@ pub struct Repo {
     pub naming: String,
     pub vcs: VcsChoice,
     pub create: Vec<String>,
+    pub locate: Vec<String>,
 }
 
 impl Repo {
@@ -68,6 +71,7 @@ impl Repo {
             naming: DEFAULT_NAMING.into(),
             vcs: VcsChoice::Auto,
             create: Vec::new(),
+            locate: Vec::new(),
         }
     }
 
@@ -132,9 +136,15 @@ fn encode_component(name: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutRequest<'a> {
-    pub issue: &'a str,
+    pub identifier: &'a str,
+    pub title: &'a str,
     pub branch: &'a str,
-    pub description: &'a str,
+}
+
+impl CheckoutRequest<'_> {
+    fn name(&self) -> String {
+        self.identifier.to_ascii_lowercase()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,9 +158,10 @@ pub fn planned_checkout(repo: &Repo, request: &CheckoutRequest<'_>) -> Checkout 
     let vcs = repo.vcs();
     let existing = match vcs {
         Vcs::Git => git_worktree_on_branch(&repo.path, request.branch),
+        Vcs::Command if !repo.locate.is_empty() => locate_workspace(repo, request),
         Vcs::Jj | Vcs::Command | Vcs::None => None,
     };
-    let path = existing.unwrap_or_else(|| repo.checkout_path(request.issue));
+    let path = existing.unwrap_or_else(|| repo.checkout_path(&request.name()));
     let created = vcs != Vcs::None && !path.is_dir();
     Checkout { path, vcs, created }
 }
@@ -192,16 +203,32 @@ fn git_worktree_on_branch(repo: &Path, branch: &str) -> Option<PathBuf> {
     })
 }
 
+fn locate_workspace(repo: &Repo, request: &CheckoutRequest<'_>) -> Option<PathBuf> {
+    let argv = workspace_command::expand(
+        &repo.locate,
+        &workspace_command::Values {
+            identifier: request.identifier,
+            branch: request.branch,
+            title: request.title,
+            dir: &repo.checkout_path(&request.name()),
+        },
+    );
+    workspace_command::locate(&argv)
+        .ok()
+        .flatten()
+        .map(|located| located.dir)
+}
+
 fn add_jj_workspace(repo: &Path, request: &CheckoutRequest<'_>, path: &Path) -> Result<()> {
     let mut command = Command::new("jj");
-    command.arg("-R").arg(repo).args([
-        "workspace",
-        "add",
-        "--name",
-        request.issue,
-        "-m",
-        request.description,
-    ]);
+    command
+        .arg("-R")
+        .arg(repo)
+        .args(["workspace", "add", "--name"]);
+    command
+        .arg(request.name())
+        .arg("-m")
+        .arg(format!("{}: {}", request.identifier, request.title));
     // Without a trunk bookmark, trunk() is the empty root commit; jj's default
     // (the primary workspace's parents) is the better base then.
     if has_trunk(repo)? {
@@ -297,9 +324,9 @@ mod tests {
 
     fn request() -> CheckoutRequest<'static> {
         CheckoutRequest {
-            issue: "eng-7",
+            identifier: "ENG-7",
+            title: "Fix thing",
             branch: "sam/eng-7-fix-thing",
-            description: "ENG-7: Fix thing",
         }
     }
 

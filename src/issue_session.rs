@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use crate::checkout::{Checkout, CheckoutRequest, Repo, Vcs, ensure_checkout};
 use crate::linear::{Comment, Issue, IssueUpdate, LinearClient};
 use crate::rex::{NewSession, Rex, RexSession};
-use crate::workspace_command;
+use crate::workspace_command::{self, Finish};
 
 pub fn session_prefix(identifier: &str) -> String {
     identifier.to_ascii_lowercase()
@@ -137,13 +137,12 @@ pub fn start(
     }
 
     let checkout = if options.per_issue_checkout {
-        let description = format!("{}: {}", issue.identifier, issue.title);
         ensure_checkout(
             options.repo,
             &CheckoutRequest {
-                issue: &session_prefix(&issue.identifier),
+                identifier: &issue.identifier,
+                title: &issue.title,
                 branch: &issue.branch_name,
-                description: &description,
             },
         )?
     } else {
@@ -160,16 +159,24 @@ pub fn start(
     let mut command = options.command.to_vec();
     command.push(issue_prompt(issue, &comments, options.notes));
     let (cwd, command) = if checkout.vcs == Vcs::Command && options.per_issue_checkout {
-        let create = workspace_command::expand(
-            &options.repo.create,
-            &workspace_command::Values {
-                identifier: &issue.identifier,
-                branch: &issue.branch_name,
-                title: &issue.title,
-                dir: &checkout.path,
-            },
-        );
-        let command = workspace_command::session_command(&create, &checkout.path, &command);
+        let values = workspace_command::Values {
+            identifier: &issue.identifier,
+            branch: &issue.branch_name,
+            title: &issue.title,
+            dir: &checkout.path,
+        };
+        let create = workspace_command::expand(&options.repo.create, &values);
+        let locate = workspace_command::expand(&options.repo.locate, &values);
+        let linrex = std::env::current_exe().context("could not find the linrex executable")?;
+        let finish = if locate.is_empty() {
+            Finish::Dir(&checkout.path)
+        } else {
+            Finish::Locate {
+                locate: &locate,
+                linrex: &linrex,
+            }
+        };
+        let command = workspace_command::session_command(&create, &finish, &command);
         (options.repo.path.as_path(), command)
     } else {
         (checkout.path.as_path(), command)

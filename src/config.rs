@@ -138,6 +138,8 @@ struct RawRepoConfig {
     vcs: VcsChoice,
     #[serde(default)]
     create: Vec<String>,
+    #[serde(default)]
+    locate: Vec<String>,
     workspace: Option<String>,
     #[serde(default)]
     teams: Vec<String>,
@@ -151,10 +153,16 @@ impl RepoConfig {
         let context = || format!("repo {}", defaults.path.display());
         let created_by_command = !raw.create.is_empty();
         if created_by_command {
-            workspace_command::validate(&raw.create).with_context(context)?;
+            workspace_command::validate("create", &raw.create).with_context(context)?;
             if raw.vcs != VcsChoice::Auto {
                 bail!("{}: set either create or vcs, not both", context());
             }
+        }
+        if !raw.locate.is_empty() {
+            if !created_by_command {
+                bail!("{}: locate needs a create command", context());
+            }
+            workspace_command::validate("locate", &raw.locate).with_context(context)?;
         }
         let naming = raw.naming.unwrap_or_else(|| {
             if created_by_command {
@@ -176,6 +184,7 @@ impl RepoConfig {
                 naming,
                 vcs: raw.vcs,
                 create: raw.create,
+                locate: raw.locate,
                 ..defaults
             },
             workspace: raw.workspace,
@@ -534,6 +543,13 @@ mod tests {
         let base = "[[workspaces]]\nname = \"a\"\napi_key_env = \"X\"\n[[repos]]\npath = \"/r\"\n";
         assert!(Config::parse(&format!("{base}create = [\"t\", \"{{nope}}\"]")).is_err());
         assert!(Config::parse(&format!("{base}create = [\"t\"]\nvcs = \"git\"")).is_err());
+        assert!(Config::parse(&format!("{base}locate = [\"t\"]")).is_err());
+        assert!(
+            Config::parse(&format!(
+                "{base}create = [\"t\"]\nlocate = [\"t\", \"{{dir}}\"]"
+            ))
+            .is_err()
+        );
     }
 
     #[test]

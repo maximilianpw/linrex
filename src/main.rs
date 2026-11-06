@@ -8,6 +8,8 @@ mod workspace_command;
 
 use std::path::PathBuf;
 
+use std::os::unix::process::CommandExt;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
@@ -49,6 +51,13 @@ enum Command {
     },
     /// Print the config file path
     ConfigPath,
+    #[command(hide = true)]
+    EnterWorkspace {
+        #[arg(long)]
+        locate: String,
+        #[arg(last = true, required = true)]
+        agent: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -58,6 +67,7 @@ fn main() -> Result<()> {
         None => Config::default_path()?,
     };
     match cli.command {
+        Some(Command::EnterWorkspace { locate, agent }) => enter_workspace(&locate, &agent),
         Some(Command::ConfigPath) => {
             println!("{}", path.display());
             Ok(())
@@ -227,4 +237,36 @@ fn start(config: &Config, identifier: &str, flags: &StartFlags) -> Result<()> {
     }
     rex.show_session(opened.session_id())
         .context("the session exists, but the Rex app did not switch to it")
+}
+
+/// Runs as the first window of an issue's Rex session once the workspace
+/// exists: one window per repo, then the agent replaces this process.
+fn enter_workspace(locate: &str, agent: &[String]) -> Result<()> {
+    let error = match open_workspace(locate, agent) {
+        Ok(never) => match never {},
+        Err(error) => error,
+    };
+    eprintln!("linrex: {error:#}");
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
+    Err(std::process::Command::new(&shell).arg("-l").exec().into())
+}
+
+fn open_workspace(locate: &str, agent: &[String]) -> Result<std::convert::Infallible> {
+    let argv: Vec<String> =
+        serde_json::from_str(locate).context("--locate must be a JSON array of strings")?;
+    let located = workspace_command::locate(&argv)?
+        .with_context(|| format!("`{}` found no workspace", argv.join(" ")))?;
+    if let Ok(session) = std::env::var("REX_SESSION") {
+        for repo in &located.repos {
+            if let Err(error) = rex::Rex.open_window(&session, &repo.name, &repo.path) {
+                eprintln!("linrex: no window for {}: {error:#}", repo.name);
+            }
+        }
+    }
+    let (program, args) = agent.split_first().context("no agent command")?;
+    Err(std::process::Command::new(program)
+        .args(args)
+        .current_dir(&located.dir)
+        .exec())
+    .with_context(|| format!("could not start `{program}` in {}", located.dir.display()))
 }

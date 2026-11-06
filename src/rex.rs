@@ -62,6 +62,24 @@ impl Rex {
         Ok(self.run::<Created>(&args)?.session_id)
     }
 
+    pub fn open_window(&self, session_id: &str, label: &str, cwd: &Path) -> Result<()> {
+        #[derive(Deserialize)]
+        struct Opened {}
+        let cwd = cwd.to_str().context("window path is not valid UTF-8")?;
+        self.run::<Opened>(&[
+            "window",
+            "new",
+            "-s",
+            session_id,
+            label,
+            "-c",
+            cwd,
+            "--focus=false",
+            "--json",
+        ])?;
+        Ok(())
+    }
+
     pub fn show_session(&self, session_id: &str) -> Result<()> {
         let client = self.app_client()?;
         let target = format!("session_id={session_id}");

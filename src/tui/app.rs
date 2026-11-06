@@ -144,9 +144,9 @@ impl Dispatch {
             planned_checkout(
                 repo,
                 &CheckoutRequest {
-                    issue: &issue_session::session_prefix(&issue.identifier),
+                    identifier: &issue.identifier,
+                    title: &issue.title,
                     branch: &issue.branch_name,
-                    description: "",
                 },
             )
         } else {
@@ -390,9 +390,9 @@ impl App {
         let checkout = planned_checkout(
             repo,
             &CheckoutRequest {
-                issue: &issue_session::session_prefix(&entry.issue.identifier),
+                identifier: &entry.issue.identifier,
+                title: &entry.issue.title,
                 branch: &entry.issue.branch_name,
-                description: "",
             },
         );
         let text = describe_checkout(&checkout);
@@ -1374,11 +1374,10 @@ pub fn describe_checkout(checkout: &Checkout) -> String {
         (_, true) => "will be created",
         (_, false) => "exists",
     };
-    format!(
-        "{} · {} {state}",
-        tilde(&checkout.path),
-        checkout.vcs.label()
-    )
+    match checkout.vcs {
+        Vcs::Command => format!("{} · {state}", tilde(&checkout.path)),
+        vcs => format!("{} · {} {state}", tilde(&checkout.path), vcs.label()),
+    }
 }
 
 pub fn tilde(path: &std::path::Path) -> String {

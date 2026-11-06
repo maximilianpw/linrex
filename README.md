@@ -74,6 +74,26 @@ command must create that folder. An existing folder is reused without running
 the command. If the command fails, the window stays open in a shell and the
 agent is not started.
 
+If the tool can also report where a workspace lives, add a `locate` command.
+linrex then asks it instead of looking for `checkout_dir/<naming>`, and opens a
+Rex window for each repo it lists next to the agent's window:
+
+```toml
+locate = ["stack-tool", "path", "{issue}", "--json"]
+```
+
+`locate` must exit non-zero when the workspace doesn't exist, and otherwise
+print one JSON object; `repos` is optional:
+
+```json
+{"dir": "/home/sam/code/stack/workspaces/eng-123",
+ "repos": [{"name": "api", "path": "/home/sam/code/stack/workspaces/eng-123/api"}]}
+```
+
+With `locate`, the session's first window runs `locate`, runs `create` if
+`locate` failed, then runs `locate` again, opens the repo windows, and starts
+the agent in `dir`.
+
 | Placeholder | Value |
 | --- | --- |
 | `{issue}` | Lowercased identifier, `eng-123` |
@@ -81,7 +101,7 @@ agent is not started.
 | `{branch}` | Linear's branch name, `sam/eng-123-fix-login-redirect` |
 | `{branch_words}` | The branch name's words after the identifier as separate arguments: `fix` `login` `redirect` |
 | `{title}` | The issue title |
-| `{dir}` | The folder the agent starts in |
+| `{dir}` | The folder the agent starts in (not available in `locate`) |
 
 ## Keys
 
