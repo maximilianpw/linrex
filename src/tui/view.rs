@@ -60,9 +60,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
         app.hitboxes.dispatch = hit;
         return;
     }
-    let list_height = (app.visible.len() as u16 + 1).clamp(4, body.height * 45 / 100);
+    let list_height = list_height(app.visible.len(), body.height);
     let [list, rule, detail] = Layout::vertical([
-        Constraint::Length(list_height.max(4)),
+        Constraint::Length(list_height),
         Constraint::Length(1),
         Constraint::Min(1),
     ])
@@ -536,6 +536,13 @@ fn popup(area: Rect, width: u16, height: u16) -> Rect {
         .areas(area);
     area
 }
+fn list_height(visible: usize, body_height: u16) -> u16 {
+    let cap = (u32::from(body_height) * 45 / 100).max(4) as u16;
+    u16::try_from(visible)
+        .unwrap_or(u16::MAX)
+        .saturating_add(1)
+        .clamp(4, cap)
+}
 fn draw_picker(frame: &mut Frame, picker: &Picker) -> PickerHitbox {
     let matches = picker.matches();
     let height = (matches.len() as u16 + 4).clamp(6, 20);
@@ -578,5 +585,23 @@ fn draw_picker(frame: &mut Frame, picker: &Picker) -> PickerHitbox {
         popup: area,
         list,
         offset: state.offset(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_height_stays_within_bounds_on_any_terminal() {
+        assert_eq!(list_height(0, 0), 4);
+        assert_eq!(list_height(0, 3), 4);
+        assert_eq!(list_height(2, 40), 4);
+        assert_eq!(list_height(9, 40), 10);
+        assert_eq!(list_height(100, 40), 18);
+        assert_eq!(
+            list_height(usize::MAX, u16::MAX),
+            (u32::from(u16::MAX) * 45 / 100) as u16
+        );
     }
 }
