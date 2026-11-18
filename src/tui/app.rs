@@ -213,6 +213,7 @@ enum Msg {
         result: JobResult<()>,
     },
     SessionOpened {
+        key: IssueKey,
         identifier: String,
         result: JobResult<Opened>,
         shown: JobResult<()>,
@@ -255,7 +256,7 @@ pub struct App {
     pub notice: Option<Notice>,
     sessions_error: Option<String>,
     pub busy: usize,
-    pub starting: HashSet<String>,
+    starting: HashSet<IssueKey>,
     pub should_quit: bool,
     pub hitboxes: Hitboxes,
     last_click: Option<(Instant, usize)>,
@@ -324,6 +325,12 @@ impl App {
 
     pub fn entry(&self, key: &IssueKey) -> Option<&Entry> {
         self.entries.iter().find(|e| &e.key() == key)
+    }
+
+    pub fn is_starting(&self, entry: &Entry) -> bool {
+        self.starting
+            .iter()
+            .any(|key| key.workspace == entry.workspace && key.id == entry.issue.id)
     }
 
     fn spawn(&mut self, job: impl FnOnce() -> Msg + Send + 'static) {
@@ -563,11 +570,12 @@ impl App {
                 }
             }
             Msg::SessionOpened {
+                key,
                 identifier,
                 result,
                 shown,
             } => {
-                self.starting.remove(&identifier);
+                self.starting.remove(&key);
                 let opened = match result {
                     Ok(opened) => opened,
                     Err(error) => return self.error(format!("{identifier}: {error}")),
@@ -575,12 +583,7 @@ impl App {
                 self.notice = Some(opened_notice(&opened, shown));
                 if let Opened::Created { status, .. } = &opened {
                     self.poll_sessions();
-                    let key = self
-                        .entries
-                        .iter()
-                        .find(|e| e.issue.identifier == identifier)
-                        .map(Entry::key);
-                    if let (StatusChange::Moved(_), Some(key)) = (status, key) {
+                    if let StatusChange::Moved(_) = status {
                         self.reload_issue(key);
                     }
                 }
@@ -1175,13 +1178,13 @@ impl App {
                     .collect()
             }
         };
-        if self.starting.contains(&identifier) {
+        if self.starting.contains(&key) {
             self.info(format!("{identifier} is already starting…"));
             return;
         }
         if let Some(session) = existing {
             let rex = self.rex.clone();
-            self.starting.insert(identifier.clone());
+            self.starting.insert(key.clone());
             self.spawn(move || Msg::SessionOpened {
                 shown: rex
                     .show_session(&session.session_id)
@@ -1190,6 +1193,7 @@ impl App {
                     session_id: session.session_id,
                     label: session.label,
                 }),
+                key,
                 identifier,
             });
             return;
@@ -1236,7 +1240,8 @@ impl App {
         let notes = dispatch.notes.lines().join("\n");
         let repo = dispatch.repo().clone();
         let per_issue_checkout = dispatch.per_issue_checkout;
-        self.starting.insert(identifier.clone());
+        let key = dispatch.target.clone();
+        self.starting.insert(key.clone());
         self.info(format!(
             "Starting {identifier} with {} in {}…",
             agent.name,
@@ -1263,6 +1268,7 @@ impl App {
                 Err(_) => Ok(()),
             };
             Msg::SessionOpened {
+                key,
                 identifier,
                 result,
                 shown,
@@ -2029,6 +2035,31 @@ mod tests {
         );
         app.handle(Msg::Sessions(Ok(vec![])));
         assert_eq!(app.footer_notice(), None);
+    }
+
+    #[test]
+    fn starting_is_tracked_per_workspace() {
+        let mut app = app();
+        load(&mut app, 0, vec![issue("1", "work issue")]);
+        load(&mut app, 1, vec![issue("1", "side issue")]);
+        let work = IssueKey {
+            workspace: 0,
+            id: "1".into(),
+        };
+        let side = IssueKey {
+            workspace: 1,
+            id: "1".into(),
+        };
+        app.starting.insert(work.clone());
+        assert!(app.is_starting(app.entry(&work).unwrap()));
+        assert!(!app.is_starting(app.entry(&side).unwrap()));
+        app.handle(Msg::SessionOpened {
+            key: side,
+            identifier: "ENG-1".into(),
+            result: Err("x".into()),
+            shown: Ok(()),
+        });
+        assert!(app.is_starting(app.entry(&work).unwrap()));
     }
 
     #[test]

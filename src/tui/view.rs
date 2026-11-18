@@ -180,7 +180,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|&index| {
             let issue = &app.entries[index].issue;
-            let marker = if app.starting.contains(&issue.identifier) {
+            let marker = if app.is_starting(&app.entries[index]) {
                 Span::styled("…", Style::new().fg(ACCENT))
             } else if app.session_for(issue).is_some() {
                 Span::styled("●", Style::new().fg(SESSION))
