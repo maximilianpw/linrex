@@ -133,6 +133,12 @@ fn list(config: &Config) -> Result<()> {
                 issue.title
             );
         }
+        if snapshot.truncated {
+            eprintln!(
+                "{name}: showing the first {} issues; more exist",
+                snapshot.issues.len()
+            );
+        }
     }
     if failed {
         bail!("some workspaces could not be loaded");

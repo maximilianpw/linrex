@@ -444,6 +444,13 @@ impl App {
                 Ok(loaded) => {
                     let (client, snapshot) = *loaded;
                     let selected = self.selected_key();
+                    if snapshot.truncated {
+                        let name = &self.workspaces[workspace].name;
+                        let count = snapshot.issues.len();
+                        self.info(format!(
+                            "{name}: showing the first {count} issues; more exist"
+                        ));
+                    }
                     self.entries.retain(|e| e.workspace != workspace);
                     self.entries.extend(
                         snapshot
@@ -1656,23 +1663,31 @@ mod tests {
         issue
     }
 
-    fn load(app: &mut App, workspace: usize, issues: Vec<Issue>) {
-        app.handle(Msg::Loaded {
+    fn snapshot(issues: Vec<Issue>) -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            viewer: User {
+                id: "me".into(),
+                display_name: "Me".into(),
+            },
+            organization: "Org".into(),
+            teams: vec![eng_team()],
+            issues,
+            truncated: false,
+        }
+    }
+
+    fn loaded(workspace: usize, snapshot: WorkspaceSnapshot) -> Msg {
+        Msg::Loaded {
             workspace,
             result: Ok(Box::new((
                 LinearClient::new("test".into()).unwrap(),
-                WorkspaceSnapshot {
-                    viewer: User {
-                        id: "me".into(),
-                        display_name: "Me".into(),
-                    },
-                    organization: "Org".into(),
-                    teams: vec![eng_team()],
-                    issues,
-                    truncated: false,
-                },
+                snapshot,
             ))),
-        });
+        }
+    }
+
+    fn load(app: &mut App, workspace: usize, issues: Vec<Issue>) {
+        app.handle(loaded(workspace, snapshot(issues)));
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1971,6 +1986,23 @@ mod tests {
         ));
         let (kind, text) = notice(&app);
         assert!(kind == NoticeKind::Error && text.contains("boom"), "{text}");
+    }
+
+    #[test]
+    fn a_truncated_load_says_so() {
+        let mut app = app();
+        app.handle(loaded(
+            0,
+            WorkspaceSnapshot {
+                truncated: true,
+                ..snapshot(vec![issue("1", "one"), issue("2", "two")])
+            },
+        ));
+        let (kind, text) = notice(&app);
+        assert!(
+            kind == NoticeKind::Info && text.contains("first 2 issues"),
+            "{text}"
+        );
     }
 
     #[test]
