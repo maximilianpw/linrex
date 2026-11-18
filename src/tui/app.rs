@@ -518,6 +518,7 @@ impl App {
                             workspace,
                             id: issue.id.clone(),
                         };
+                        let previous = self.selected_key();
                         match self
                             .entries
                             .iter_mut()
@@ -526,7 +527,11 @@ impl App {
                             Some(entry) => entry.issue = issue,
                             None => self.entries.push(Entry { workspace, issue }),
                         }
-                        self.recompute(Some(key));
+                        self.recompute(None);
+                        let follows_saved = saved != Saved::Reloaded && self.select_key(&key);
+                        if !follows_saved && let Some(previous) = previous {
+                            self.select_key(&previous);
+                        }
                         if let Some(text) = text {
                             self.info(text);
                         }
@@ -680,6 +685,17 @@ impl App {
 
     fn selected_key(&self) -> Option<IssueKey> {
         self.selected().map(Entry::key)
+    }
+
+    fn select_key(&mut self, key: &IssueKey) -> bool {
+        let Some(row) = self.visible.iter().position(|&i| {
+            let entry = &self.entries[i];
+            entry.workspace == key.workspace && entry.issue.id == key.id
+        }) else {
+            return false;
+        };
+        self.table.select(Some(row));
+        true
     }
 
     pub fn session_for(&self, issue: &Issue) -> Option<&RexSession> {
@@ -1925,6 +1941,57 @@ mod tests {
         });
         assert!(app.entries.iter().any(|e| e.issue.id == "9"));
         assert_eq!(app.selected().unwrap().issue.id, "9");
+    }
+
+    fn saved(app: &mut App, issue: Issue, saved: Saved) {
+        app.handle(Msg::IssueSaved {
+            workspace: 0,
+            result: Ok(Box::new(issue)),
+            saved,
+        });
+    }
+
+    #[test]
+    fn a_background_reload_does_not_move_the_selection() {
+        let mut app = app();
+        load(&mut app, 0, three_issues());
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.selected().unwrap().issue.id, "3");
+        saved(
+            &mut app,
+            with_state(issue("1", "Fix login redirect"), StateType::Started),
+            Saved::Reloaded,
+        );
+        assert_eq!(app.selected().unwrap().issue.id, "3");
+    }
+
+    #[test]
+    fn an_updated_issue_stays_selected_when_it_moves() {
+        let mut app = app();
+        load(&mut app, 0, three_issues());
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.selected().unwrap().issue.id, "2");
+        saved(
+            &mut app,
+            with_state(issue("2", "Add billing page"), StateType::Started),
+            Saved::Updated,
+        );
+        assert_eq!(app.selected().unwrap().issue.id, "2");
+        assert_eq!(app.table.selected(), Some(0));
+    }
+
+    #[test]
+    fn an_update_to_a_hidden_issue_keeps_the_selection() {
+        let mut app = app();
+        load(&mut app, 0, three_issues());
+        type_text(&mut app, "ad");
+        assert_eq!(titles(&app).len(), 2);
+        app.on_key(key(KeyCode::Down));
+        let selected = app.selected().unwrap().issue.id.clone();
+        assert_ne!(selected, "1");
+        saved(&mut app, issue("1", "Fix login redirect"), Saved::Updated);
+        assert_eq!(app.selected().unwrap().issue.id, selected);
     }
 
     #[test]
