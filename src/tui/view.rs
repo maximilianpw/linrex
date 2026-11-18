@@ -79,10 +79,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
 
     match &app.mode {
         Mode::Picker(picker) => app.hitboxes.picker = Some(draw_picker(frame, picker)),
-        Mode::Compose(compose, editor) => {
-            let title = match compose {
+        Mode::Compose(compose) => {
+            let title = match &compose.compose {
                 Compose::Comment { identifier, .. } => format!(" Comment on {identifier} "),
                 Compose::NewIssue { team_key, .. } => format!(" New {team_key} issue "),
+            };
+            let hint = if compose.sending {
+                " sending… "
+            } else {
+                " ctrl-s send · esc cancel "
             };
             let area = popup(frame.area(), 70, 14);
             frame.render_widget(Clear, area);
@@ -91,10 +96,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::new().fg(ACCENT))
                 .title(title)
-                .title_bottom(Line::from(" ctrl-s send · esc cancel ").fg(DIM));
+                .title_bottom(Line::from(hint).fg(DIM));
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            frame.render_widget(editor.as_ref(), inner);
+            frame.render_widget(&compose.editor, inner);
         }
         Mode::Normal | Mode::Dispatch(_) => {}
     }

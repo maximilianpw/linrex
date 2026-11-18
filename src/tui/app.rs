@@ -160,10 +160,16 @@ impl Dispatch {
     }
 }
 
+pub struct ComposeEditor {
+    pub compose: Compose,
+    pub editor: TextArea<'static>,
+    pub sending: bool,
+}
+
 pub enum Mode {
     Normal,
     Picker(Picker),
-    Compose(Compose, Box<TextArea<'static>>),
+    Compose(Box<ComposeEditor>),
     Dispatch(Box<Dispatch>),
 }
 
@@ -200,7 +206,7 @@ enum Msg {
     IssueSaved {
         workspace: usize,
         result: JobResult<Box<Issue>>,
-        what: Option<&'static str>,
+        saved: Saved,
     },
     CommentAdded {
         key: IssueKey,
@@ -211,6 +217,13 @@ enum Msg {
         result: JobResult<Opened>,
         shown: JobResult<()>,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Saved {
+    Created,
+    Updated,
+    Reloaded,
 }
 
 #[derive(Clone, Copy)]
@@ -488,37 +501,49 @@ impl App {
             Msg::IssueSaved {
                 workspace,
                 result,
-                what,
-            } => match result {
-                Ok(issue) => {
-                    let issue = *issue;
-                    let text = what.map(|what| format!("{} {what}", issue.identifier));
-                    let key = IssueKey {
-                        workspace,
-                        id: issue.id.clone(),
-                    };
-                    match self
-                        .entries
-                        .iter_mut()
-                        .find(|e| e.workspace == workspace && e.issue.id == issue.id)
-                    {
-                        Some(entry) => entry.issue = issue,
-                        None => self.entries.push(Entry { workspace, issue }),
-                    }
-                    self.recompute(Some(key));
-                    if let Some(text) = text {
-                        self.info(text);
-                    }
+                saved,
+            } => {
+                if saved == Saved::Created {
+                    self.finish_send(result.is_ok());
                 }
-                Err(error) => self.error(error),
-            },
-            Msg::CommentAdded { key, result } => match result {
-                Ok(()) => {
-                    self.comments.remove(&key);
-                    self.info("Comment added");
+                match result {
+                    Ok(issue) => {
+                        let issue = *issue;
+                        let text = match saved {
+                            Saved::Created => Some(format!("{} created", issue.identifier)),
+                            Saved::Updated => Some(format!("{} updated", issue.identifier)),
+                            Saved::Reloaded => None,
+                        };
+                        let key = IssueKey {
+                            workspace,
+                            id: issue.id.clone(),
+                        };
+                        match self
+                            .entries
+                            .iter_mut()
+                            .find(|e| e.workspace == workspace && e.issue.id == issue.id)
+                        {
+                            Some(entry) => entry.issue = issue,
+                            None => self.entries.push(Entry { workspace, issue }),
+                        }
+                        self.recompute(Some(key));
+                        if let Some(text) = text {
+                            self.info(text);
+                        }
+                    }
+                    Err(error) => self.error(error),
                 }
-                Err(error) => self.error(error),
-            },
+            }
+            Msg::CommentAdded { key, result } => {
+                self.finish_send(result.is_ok());
+                match result {
+                    Ok(()) => {
+                        self.comments.remove(&key);
+                        self.info("Comment added");
+                    }
+                    Err(error) => self.error(error),
+                }
+            }
             Msg::SessionOpened {
                 identifier,
                 result,
@@ -552,8 +577,20 @@ impl App {
         self.spawn(move || Msg::IssueSaved {
             workspace: key.workspace,
             result: client.issue(&key.id).map(Box::new).map_err(describe),
-            what: None,
+            saved: Saved::Reloaded,
         });
+    }
+
+    fn finish_send(&mut self, succeeded: bool) {
+        if let Mode::Compose(compose) = &mut self.mode
+            && compose.sending
+        {
+            if succeeded {
+                self.mode = Mode::Normal;
+            } else {
+                compose.sending = false;
+            }
+        }
     }
 
     fn ensure_comments(&mut self) {
@@ -707,7 +744,7 @@ impl App {
                 return;
             }
             Mode::Picker(picker) => self.on_picker_key(picker, key),
-            Mode::Compose(compose, editor) => self.on_compose_key(compose, editor, key),
+            Mode::Compose(compose) => self.on_compose_key(compose, key),
             Mode::Dispatch(dispatch) => self.on_dispatch_key(dispatch, key),
         };
     }
@@ -940,29 +977,26 @@ impl App {
         Mode::Picker(picker)
     }
 
-    fn on_compose_key(
-        &mut self,
-        compose: Compose,
-        mut editor: Box<TextArea<'static>>,
-        key: KeyEvent,
-    ) -> Mode {
+    fn on_compose_key(&mut self, mut compose: Box<ComposeEditor>, key: KeyEvent) -> Mode {
+        if compose.sending {
+            return Mode::Compose(compose);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => Mode::Normal,
+            KeyCode::Esc => return Mode::Normal,
             KeyCode::Char('s') if ctrl => {
-                let text = editor.lines().join("\n");
+                let text = compose.editor.lines().join("\n");
                 if text.trim().is_empty() {
                     self.error("Nothing to send");
-                    return Mode::Compose(compose, editor);
+                } else {
+                    compose.sending = self.submit(&compose.compose, text);
                 }
-                self.submit(compose, text);
-                Mode::Normal
             }
             _ => {
-                editor.input(key);
-                Mode::Compose(compose, editor)
+                compose.editor.input(key);
             }
         }
+        Mode::Compose(compose)
     }
 
     fn on_dispatch_key(&mut self, mut dispatch: Box<Dispatch>, key: KeyEvent) -> Mode {
@@ -1002,12 +1036,19 @@ impl App {
         Mode::Dispatch(dispatch)
     }
 
-    fn submit(&mut self, compose: Compose, text: String) {
+    fn submit(&mut self, compose: &Compose, text: String) -> bool {
+        let workspace = match compose {
+            Compose::Comment { target, .. } => target.workspace,
+            Compose::NewIssue { workspace, .. } => *workspace,
+        };
+        let ws = &self.workspaces[workspace];
+        let Some(client) = ws.client().cloned() else {
+            self.error(format!("{} is not loaded", ws.name));
+            return false;
+        };
         match compose {
             Compose::Comment { target, identifier } => {
-                let Some(client) = self.workspaces[target.workspace].client().cloned() else {
-                    return;
-                };
+                let target = target.clone();
                 self.info(format!("Commenting on {identifier}…"));
                 self.spawn(move || Msg::CommentAdded {
                     result: client
@@ -1017,17 +1058,11 @@ impl App {
                 });
             }
             Compose::NewIssue {
-                workspace,
-                team_id,
-                team_key,
+                team_id, team_key, ..
             } => {
-                let ws = &self.workspaces[workspace];
-                let Some(client) = ws.client().cloned() else {
-                    return;
-                };
                 let (title, description) = split_title(&text);
                 let new = NewIssue {
-                    team_id,
+                    team_id: team_id.clone(),
                     title,
                     description,
                     assignee_id: ws.viewer_id().map(str::to_owned),
@@ -1036,10 +1071,11 @@ impl App {
                 self.spawn(move || Msg::IssueSaved {
                     workspace,
                     result: client.create_issue(&new).map(Box::new).map_err(describe),
-                    what: Some("created"),
+                    saved: Saved::Created,
                 });
             }
         }
+        true
     }
 
     fn apply_choice(&mut self, target: Option<IssueKey>, choice: Choice) -> Mode {
@@ -1049,15 +1085,15 @@ impl App {
                 team_id,
                 team_key,
             } => {
-                let editor = theme::editor("First line is the title; the rest is the description.");
-                return Mode::Compose(
-                    Compose::NewIssue {
+                return Mode::Compose(Box::new(ComposeEditor {
+                    compose: Compose::NewIssue {
                         workspace,
                         team_id,
                         team_key,
                     },
-                    Box::new(editor),
-                );
+                    editor: theme::editor("First line is the title; the rest is the description."),
+                    sending: false,
+                }));
             }
             Choice::State(id) => IssueUpdate {
                 state_id: Some(id),
@@ -1082,7 +1118,7 @@ impl App {
                     .update_issue(&target.id, &update)
                     .map(Box::new)
                     .map_err(describe),
-                what: Some("updated"),
+                saved: Saved::Updated,
             });
         }
         Mode::Normal
@@ -1328,8 +1364,11 @@ impl App {
         };
         let target = entry.key();
         let identifier = entry.issue.identifier.clone();
-        let editor = theme::editor("Write a comment (Markdown)");
-        self.mode = Mode::Compose(Compose::Comment { target, identifier }, Box::new(editor));
+        self.mode = Mode::Compose(Box::new(ComposeEditor {
+            compose: Compose::Comment { target, identifier },
+            editor: theme::editor("Write a comment (Markdown)"),
+            sending: false,
+        }));
     }
 
     fn open_team_picker(&mut self) {
@@ -1577,6 +1616,105 @@ mod tests {
         (notice.kind, notice.text.as_str())
     }
 
+    fn editor(app: &mut App) -> &mut ComposeEditor {
+        match &mut app.mode {
+            Mode::Compose(compose) => compose,
+            _ => panic!("expected the compose editor"),
+        }
+    }
+
+    fn comment_key() -> IssueKey {
+        IssueKey {
+            workspace: 0,
+            id: "1".into(),
+        }
+    }
+
+    fn sending_comment(app: &mut App, text: &str) {
+        load(app, 0, vec![issue("1", "Fix login redirect")]);
+        app.on_key(ctrl('e'));
+        type_text(app, text);
+        editor(app).sending = true;
+    }
+
+    #[test]
+    fn a_failed_comment_keeps_the_editor_and_its_text() {
+        let mut app = app();
+        sending_comment(&mut app, "hi");
+        app.handle(Msg::CommentAdded {
+            key: comment_key(),
+            result: Err("offline".into()),
+        });
+        let compose = editor(&mut app);
+        assert!(!compose.sending);
+        assert_eq!(compose.editor.lines(), ["hi"]);
+        let (kind, text) = notice(&app);
+        assert!(
+            kind == NoticeKind::Error && text.contains("offline"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_sent_comment_closes_the_editor() {
+        let mut app = app();
+        sending_comment(&mut app, "hi");
+        app.handle(Msg::CommentAdded {
+            key: comment_key(),
+            result: Ok(()),
+        });
+        assert!(matches!(app.mode, Mode::Normal));
+        let (kind, text) = notice(&app);
+        assert!(
+            kind == NoticeKind::Info && text == "Comment added",
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_new_issue_keeps_the_editor() {
+        let mut app = app();
+        app.mode = Mode::Compose(Box::new(ComposeEditor {
+            compose: Compose::NewIssue {
+                workspace: 0,
+                team_id: "team-eng".into(),
+                team_key: "ENG".into(),
+            },
+            editor: theme::editor(""),
+            sending: true,
+        }));
+        app.handle(Msg::IssueSaved {
+            workspace: 0,
+            result: Err("offline".into()),
+            saved: Saved::Created,
+        });
+        assert!(!editor(&mut app).sending);
+    }
+
+    #[test]
+    fn keys_are_ignored_while_sending() {
+        let mut app = app();
+        sending_comment(&mut app, "hi");
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('x')));
+        let compose = editor(&mut app);
+        assert!(compose.sending);
+        assert_eq!(compose.editor.lines(), ["hi"]);
+    }
+
+    #[test]
+    fn an_update_result_does_not_touch_an_open_editor() {
+        let mut app = app();
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        app.on_key(ctrl('e'));
+        app.handle(Msg::IssueSaved {
+            workspace: 0,
+            result: Ok(Box::new(issue("1", "Renamed"))),
+            saved: Saved::Updated,
+        });
+        assert!(!editor(&mut app).sending);
+    }
+
     #[test]
     fn sorts_by_state_then_priority_then_recency() {
         let mut app = app();
@@ -1765,7 +1903,7 @@ mod tests {
         app.handle(Msg::IssueSaved {
             workspace: 0,
             result: Ok(Box::new(issue("1", "New title"))),
-            what: Some("updated"),
+            saved: Saved::Updated,
         });
         assert_eq!(app.entries.len(), 1);
         assert_eq!(app.entries[0].issue.title, "New title");
@@ -1783,7 +1921,7 @@ mod tests {
         app.handle(Msg::IssueSaved {
             workspace: 0,
             result: Ok(Box::new(issue("9", "Brand new"))),
-            what: Some("created"),
+            saved: Saved::Created,
         });
         assert!(app.entries.iter().any(|e| e.issue.id == "9"));
         assert_eq!(app.selected().unwrap().issue.id, "9");
@@ -1846,13 +1984,13 @@ mod tests {
         load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
         app.on_key(ctrl('e'));
         assert!(matches!(
-            app.mode,
-            Mode::Compose(Compose::Comment { .. }, _)
+            &app.mode,
+            Mode::Compose(compose) if matches!(compose.compose, Compose::Comment { .. })
         ));
         app.on_key(key(KeyCode::Char('x')));
         assert!(matches!(
-            app.mode,
-            Mode::Compose(Compose::Comment { .. }, _)
+            &app.mode,
+            Mode::Compose(compose) if matches!(compose.compose, Compose::Comment { .. })
         ));
         app.on_key(key(KeyCode::Esc));
         assert!(matches!(app.mode, Mode::Normal));
@@ -1861,7 +1999,7 @@ mod tests {
     #[test]
     fn draws_every_mode_at_any_terminal_size() {
         type Setup = fn(&mut App);
-        let modes: [(&str, Setup); 6] = [
+        let modes: [(&str, Setup); 7] = [
             ("empty", |_| {}),
             ("three issues", |app| load(app, 0, three_issues())),
             ("priority picker", |app| {
@@ -1872,6 +2010,7 @@ mod tests {
                 load(app, 0, three_issues());
                 app.on_key(ctrl('e'));
             }),
+            ("sending comment", |app| sending_comment(app, "hi")),
             ("dispatch", |app| {
                 load(app, 0, three_issues());
                 app.on_key(key(KeyCode::Enter));
