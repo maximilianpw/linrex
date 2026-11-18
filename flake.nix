@@ -52,6 +52,7 @@
               pkgs.git
               pkgs.jujutsu
             ];
+            __darwinAllowLocalNetworking = true;
 
             meta = {
               description = cargoToml.package.description;
