@@ -437,15 +437,20 @@ fn draw_dispatch(
         lines.push(Line::from(vec![
             label(""),
             Span::styled(
-                if dispatch.per_issue_checkout {
-                    format!("    {}", describe_checkout(&dispatch.checkout))
-                } else {
-                    format!("    {} · main checkout", tilde(&dispatch.checkout.path))
+                match &dispatch.checkout {
+                    None => "    …".into(),
+                    Some(checkout) if dispatch.per_issue_checkout => {
+                        format!("    {}", describe_checkout(checkout))
+                    }
+                    Some(checkout) => format!("    {} · main checkout", tilde(&checkout.path)),
                 },
                 Style::new().fg(DIM),
             ),
         ]));
-        if repo.vcs() == Vcs::Command && dispatch.per_issue_checkout && dispatch.checkout.created {
+        if repo.vcs() == Vcs::Command
+            && dispatch.per_issue_checkout
+            && dispatch.checkout.as_ref().is_some_and(|c| c.created)
+        {
             lines.push(Line::from(vec![
                 label(""),
                 Span::styled(

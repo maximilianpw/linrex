@@ -130,33 +130,13 @@ pub struct Dispatch {
     pub repos: Vec<Repo>,
     pub repo: usize,
     pub per_issue_checkout: bool,
-    pub checkout: Checkout,
+    pub checkout: Option<Checkout>,
     pub notes: TextArea<'static>,
 }
 
 impl Dispatch {
     pub fn repo(&self) -> &Repo {
         &self.repos[self.repo]
-    }
-
-    fn replan(&mut self, issue: &Issue) {
-        let repo = &self.repos[self.repo];
-        self.checkout = if self.per_issue_checkout {
-            planned_checkout(
-                repo,
-                &CheckoutRequest {
-                    identifier: &issue.identifier,
-                    title: &issue.title,
-                    branch: &issue.branch_name,
-                },
-            )
-        } else {
-            Checkout {
-                path: repo.path.clone(),
-                vcs: repo.vcs(),
-                created: false,
-            }
-        };
     }
 }
 
@@ -193,6 +173,11 @@ enum Msg {
     },
     Sessions(JobResult<Vec<RexSession>>),
     CheckoutPreview(CheckoutPreview),
+    DispatchPlanned {
+        target: IssueKey,
+        repo: usize,
+        checkout: Checkout,
+    },
     Comments {
         key: IssueKey,
         result: JobResult<Vec<Comment>>,
@@ -488,6 +473,20 @@ impl App {
                     self.preview_requested = None;
                 }
                 self.checkout_preview = Some(preview);
+            }
+            Msg::DispatchPlanned {
+                target,
+                repo,
+                checkout,
+            } => {
+                if let Mode::Dispatch(dispatch) = &mut self.mode
+                    && dispatch.target == target
+                    && dispatch.repo == repo
+                    && dispatch.per_issue_checkout
+                    && dispatch.checkout.is_none()
+                {
+                    dispatch.checkout = Some(checkout);
+                }
             }
             Msg::Sessions(Ok(sessions)) => {
                 self.sessions = sessions;
@@ -898,13 +897,13 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) if hit.repo.contains(at) => {
                 dispatch.repo = (dispatch.repo + 1) % dispatch.repos.len();
-                dispatch.replan(&issue);
+                self.plan_checkout(&mut dispatch, &issue);
             }
             MouseEventKind::Down(MouseButton::Left)
                 if hit.checkout.contains(at) && dispatch.repo().vcs() != Vcs::None =>
             {
                 dispatch.per_issue_checkout = !dispatch.per_issue_checkout;
-                dispatch.replan(&issue);
+                self.plan_checkout(&mut dispatch, &issue);
             }
             _ => {}
         }
@@ -1055,11 +1054,11 @@ impl App {
                 } else {
                     (dispatch.repo + count - 1) % count
                 };
-                dispatch.replan(&issue);
+                self.plan_checkout(&mut dispatch, &issue);
             }
             KeyCode::Char('w') if ctrl => {
                 dispatch.per_issue_checkout = !dispatch.per_issue_checkout;
-                dispatch.replan(&issue);
+                self.plan_checkout(&mut dispatch, &issue);
             }
             _ => {
                 dispatch.notes.input(key);
@@ -1210,19 +1209,50 @@ impl App {
         let mut dispatch = Dispatch {
             target: key,
             agent: 0,
-            checkout: Checkout {
-                path: repos[0].path.clone(),
-                vcs: Vcs::None,
-                created: false,
-            },
+            checkout: None,
             repos,
             repo: 0,
             per_issue_checkout: true,
             notes,
         };
-        dispatch.replan(&issue);
+        self.plan_checkout(&mut dispatch, &issue);
         self.notice = None;
         self.mode = Mode::Dispatch(Box::new(dispatch));
+    }
+
+    fn plan_checkout(&mut self, dispatch: &mut Dispatch, issue: &Issue) {
+        let repo = dispatch.repo().clone();
+        if !dispatch.per_issue_checkout {
+            dispatch.checkout = Some(Checkout {
+                vcs: repo.vcs(),
+                path: repo.path,
+                created: false,
+            });
+            return;
+        }
+        dispatch.checkout = None;
+        let target = dispatch.target.clone();
+        let index = dispatch.repo;
+        let (identifier, title, branch) = (
+            issue.identifier.clone(),
+            issue.title.clone(),
+            issue.branch_name.clone(),
+        );
+        self.spawn(move || {
+            let checkout = planned_checkout(
+                &repo,
+                &CheckoutRequest {
+                    identifier: &identifier,
+                    title: &title,
+                    branch: &branch,
+                },
+            );
+            Msg::DispatchPlanned {
+                target,
+                repo: index,
+                checkout,
+            }
+        });
     }
 
     fn start_session(&mut self, dispatch: Dispatch) {
@@ -1242,10 +1272,11 @@ impl App {
         let per_issue_checkout = dispatch.per_issue_checkout;
         let key = dispatch.target.clone();
         self.starting.insert(key.clone());
+        let path = dispatch.checkout.as_ref().map_or(&repo.path, |c| &c.path);
         self.info(format!(
             "Starting {identifier} with {} in {}…",
             agent.name,
-            tilde(&dispatch.checkout.path)
+            tilde(path)
         ));
         self.spawn(move || {
             let result = issue_session::start(
@@ -1553,8 +1584,31 @@ mod tests {
         teams = ["ENG"]
     "#;
 
+    const GIT_CONFIG: &str = r#"
+        [[workspaces]]
+        name = "work"
+        api_key_env = "LINREX_TEST_UNSET_WORK"
+
+        [[repos]]
+        path = "/linrex-test-missing/repo"
+        vcs = "git"
+        workspace = "work"
+        teams = ["ENG"]
+    "#;
+
     fn app() -> App {
         App::new(Config::parse(CONFIG).unwrap().0)
+    }
+
+    fn git_app() -> App {
+        App::new(Config::parse(GIT_CONFIG).unwrap().0)
+    }
+
+    fn dispatch(app: &App) -> &Dispatch {
+        match &app.mode {
+            Mode::Dispatch(dispatch) => dispatch,
+            _ => panic!("expected the dispatch screen"),
+        }
     }
 
     fn eng_team() -> Team {
@@ -2095,6 +2149,75 @@ mod tests {
         assert!(matches!(app.mode, Mode::Normal));
     }
 
+    fn first_issue_key() -> IssueKey {
+        IssueKey {
+            workspace: 0,
+            id: "1".into(),
+        }
+    }
+
+    fn planned(target: IssueKey, repo: usize) -> Msg {
+        Msg::DispatchPlanned {
+            target,
+            repo,
+            checkout: Checkout {
+                path: "/x".into(),
+                vcs: Vcs::Git,
+                created: true,
+            },
+        }
+    }
+
+    #[test]
+    fn the_dispatch_screen_opens_before_the_checkout_is_planned() {
+        let mut app = git_app();
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        app.on_key(key(KeyCode::Enter));
+        assert!(dispatch(&app).checkout.is_none());
+        app.handle(planned(first_issue_key(), 0));
+        assert_eq!(
+            dispatch(&app).checkout,
+            Some(Checkout {
+                path: "/x".into(),
+                vcs: Vcs::Git,
+                created: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_stale_checkout_plan_is_ignored() {
+        let mut app = git_app();
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        app.on_key(key(KeyCode::Enter));
+        app.handle(planned(first_issue_key(), 1));
+        assert!(dispatch(&app).checkout.is_none());
+        app.handle(planned(
+            IssueKey {
+                workspace: 0,
+                id: "2".into(),
+            },
+            0,
+        ));
+        assert!(dispatch(&app).checkout.is_none());
+    }
+
+    #[test]
+    fn turning_the_checkout_off_needs_no_planning() {
+        let mut app = git_app();
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(ctrl('w'));
+        let main = Some(Checkout {
+            path: "/linrex-test-missing/repo".into(),
+            vcs: Vcs::Git,
+            created: false,
+        });
+        assert_eq!(dispatch(&app).checkout, main);
+        app.handle(planned(first_issue_key(), 0));
+        assert_eq!(dispatch(&app).checkout, main);
+    }
+
     #[test]
     fn enter_reports_an_unmapped_team() {
         let mut app = app();
@@ -2134,7 +2257,7 @@ mod tests {
     #[test]
     fn draws_every_mode_at_any_terminal_size() {
         type Setup = fn(&mut App);
-        let modes: [(&str, Setup); 7] = [
+        let modes: [(&str, Setup); 8] = [
             ("empty", |_| {}),
             ("three issues", |app| load(app, 0, three_issues())),
             ("priority picker", |app| {
@@ -2147,6 +2270,11 @@ mod tests {
             }),
             ("sending comment", |app| sending_comment(app, "hi")),
             ("dispatch", |app| {
+                load(app, 0, three_issues());
+                app.on_key(key(KeyCode::Enter));
+            }),
+            ("dispatch planning a checkout", |app| {
+                *app = git_app();
                 load(app, 0, three_issues());
                 app.on_key(key(KeyCode::Enter));
             }),
