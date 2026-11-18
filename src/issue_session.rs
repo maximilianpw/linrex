@@ -136,6 +136,10 @@ pub fn start(
         });
     }
 
+    let comments = linear
+        .comments(&issue.id)
+        .context("could not load the issue's comments")?;
+
     let checkout = if options.per_issue_checkout {
         ensure_checkout(
             options.repo,
@@ -153,9 +157,6 @@ pub fn start(
         }
     };
 
-    let comments = linear
-        .comments(&issue.id)
-        .context("could not load the issue's comments")?;
     let mut command = options.command.to_vec();
     command.push(issue_prompt(issue, &comments, options.notes));
     let (cwd, command) = if checkout.vcs == Vcs::Command && options.per_issue_checkout {
