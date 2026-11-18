@@ -78,12 +78,16 @@ struct IssuePage {
 
 impl LinearClient {
     pub fn new(api_key: String) -> LinearResult<Self> {
+        let endpoint =
+            std::env::var("LINREX_LINEAR_ENDPOINT").unwrap_or_else(|_| ENDPOINT.to_owned());
+        Self::with_endpoint(api_key, endpoint)
+    }
+
+    fn with_endpoint(api_key: String, endpoint: String) -> LinearResult<Self> {
         let http = reqwest::blocking::Client::builder()
             .user_agent(concat!("linrex/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
-        let endpoint =
-            std::env::var("LINREX_LINEAR_ENDPOINT").unwrap_or_else(|_| ENDPOINT.to_owned());
         Ok(Self {
             http,
             api_key,
@@ -342,6 +346,100 @@ fn decode_response<T: DeserializeOwned>(status: u16, body: &str) -> LinearResult
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    const ISSUE: &str = r##"{
+        "id":"i1","identifier":"ENG-1129","title":"Flag","description":"  ",
+        "url":"https://linear.app/acme/issue/ENG-1129","branchName":"sam/eng-1129-flag",
+        "priority":2,"updatedAt":"2026-11-01T10:00:00.000Z",
+        "state":{"id":"s1","name":"In Progress","type":"started","color":"#f2c94c","position":2},
+        "team":{"id":"t1","key":"ENG","name":"ENG"},
+        "assignee":null,"project":{"name":"Payments"},
+        "labels":{"nodes":[{"name":"Bug"}]}}"##;
+
+    struct Recorded {
+        authorization: Option<String>,
+        body: String,
+    }
+
+    fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<Recorded>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/graphql", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let handle = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut recorded = Vec::new();
+            for response in responses {
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() > deadline {
+                                return recorded;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut content_length = 0;
+                let mut authorization = None;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        let value = value.trim();
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.parse().unwrap();
+                        } else if name.eq_ignore_ascii_case("authorization") {
+                            authorization = Some(value.to_owned());
+                        }
+                    }
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).unwrap();
+                recorded.push(Recorded {
+                    authorization,
+                    body: String::from_utf8(body).unwrap(),
+                });
+                let mut stream = reader.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                )
+                .unwrap();
+            }
+            recorded
+        });
+        (endpoint, handle)
+    }
+
+    fn client(endpoint: String) -> LinearClient {
+        LinearClient::with_endpoint("test-key".into(), endpoint).unwrap()
+    }
+
+    #[test]
+    fn sends_the_api_key_and_query_to_the_endpoint() {
+        let (endpoint, server) = serve(vec![format!(r#"{{"data":{{"issue":{ISSUE}}}}}"#)]);
+        let issue = client(endpoint).issue("ENG-1129").unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(issue.identifier, "ENG-1129");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].authorization.as_deref(), Some("test-key"));
+        assert!(requests[0].body.contains(r#""id":"ENG-1129""#));
+    }
 
     #[test]
     fn decodes_issue_and_normalizes_fields() {
@@ -349,15 +447,8 @@ mod tests {
         struct Data {
             issue: model::RawIssue,
         }
-        let body = r##"{"data":{"issue":{
-            "id":"i1","identifier":"ENG-1129","title":"Flag","description":"  ",
-            "url":"https://linear.app/acme/issue/ENG-1129","branchName":"sam/eng-1129-flag",
-            "priority":2,"updatedAt":"2026-11-01T10:00:00.000Z",
-            "state":{"id":"s1","name":"In Progress","type":"started","color":"#f2c94c","position":2},
-            "team":{"id":"t1","key":"ENG","name":"ENG"},
-            "assignee":null,"project":{"name":"Payments"},
-            "labels":{"nodes":[{"name":"Bug"}]}}}}"##;
-        let data: Data = decode_response(200, body).unwrap();
+        let body = format!(r#"{{"data":{{"issue":{ISSUE}}}}}"#);
+        let data: Data = decode_response(200, &body).unwrap();
         let issue = Issue::from(data.issue);
         assert_eq!(issue.priority, Priority::High);
         assert_eq!(issue.state.kind, StateType::Started);
