@@ -169,6 +169,20 @@ command = ["codex"]
 `LINREX_LINEAR_ENDPOINT` points the client at another GraphQL endpoint, such as
 a local mock for testing.
 
+## Development
+
+linrex needs Rust 1.89 or newer. The tests create real git and jj
+repositories, so both `git` and `jj` must be on your PATH; `nix develop`
+provides them along with the toolchain.
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+CI runs the same three commands on every push and pull request.
+
 ## Inspiration
 
 The search-first layout and the dispatch screen come from

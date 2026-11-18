@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Format
+        run: nix develop -c cargo fmt --check
+      - name: Lint
+        run: nix develop -c cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: nix develop -c cargo test
