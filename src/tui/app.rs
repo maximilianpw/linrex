@@ -1458,7 +1458,454 @@ pub fn state_rank(kind: StateType) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::linear::WorkflowState;
+
+    const CONFIG: &str = r#"
+        [[workspaces]]
+        name = "work"
+        api_key_env = "LINREX_TEST_UNSET_WORK"
+
+        [[workspaces]]
+        name = "side"
+        api_key_env = "LINREX_TEST_UNSET_SIDE"
+
+        [[repos]]
+        path = "/"
+        vcs = "none"
+        workspace = "work"
+        teams = ["ENG"]
+    "#;
+
+    fn app() -> App {
+        App::new(Config::parse(CONFIG).unwrap().0)
+    }
+
+    fn eng_team() -> Team {
+        Team {
+            id: "team-eng".into(),
+            key: "ENG".into(),
+            name: "Engineering".into(),
+        }
+    }
+
+    fn issue(id: &str, title: &str) -> Issue {
+        Issue {
+            id: id.into(),
+            identifier: format!("ENG-{id}"),
+            title: title.into(),
+            description: None,
+            url: format!("https://linear.app/x/issue/ENG-{id}"),
+            branch_name: format!("eng-{id}"),
+            priority: Priority::None,
+            updated_at: String::new(),
+            state: WorkflowState {
+                id: "state-todo".into(),
+                name: "Todo".into(),
+                kind: StateType::Unstarted,
+                color: String::new(),
+                position: 0.0,
+            },
+            team: eng_team(),
+            assignee: None,
+            project: None,
+            labels: vec![],
+        }
+    }
+
+    fn with_state(mut issue: Issue, kind: StateType) -> Issue {
+        issue.state.kind = kind;
+        issue
+    }
+
+    fn in_project(mut issue: Issue, project: &str) -> Issue {
+        issue.project = Some(project.into());
+        issue
+    }
+
+    fn load(app: &mut App, workspace: usize, issues: Vec<Issue>) {
+        app.handle(Msg::Loaded {
+            workspace,
+            result: Ok(Box::new((
+                LinearClient::new("test".into()).unwrap(),
+                WorkspaceSnapshot {
+                    viewer: User {
+                        id: "me".into(),
+                        display_name: "Me".into(),
+                    },
+                    organization: "Org".into(),
+                    teams: vec![eng_team()],
+                    issues,
+                },
+            ))),
+        });
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn titles(app: &App) -> Vec<&str> {
+        app.visible
+            .iter()
+            .map(|&i| app.entries[i].issue.title.as_str())
+            .collect()
+    }
+
+    fn three_issues() -> Vec<Issue> {
+        vec![
+            issue("1", "Fix login redirect"),
+            issue("2", "Add billing page"),
+            issue("3", "Update onboarding docs"),
+        ]
+    }
+
+    fn notice(app: &App) -> (NoticeKind, &str) {
+        let notice = app.notice.as_ref().expect("a notice");
+        (notice.kind, notice.text.as_str())
+    }
+
+    #[test]
+    fn sorts_by_state_then_priority_then_recency() {
+        let mut app = app();
+        let urgent = Issue {
+            priority: Priority::Urgent,
+            ..issue("2", "unstarted urgent")
+        };
+        let newer = Issue {
+            updated_at: "2026-11-02".into(),
+            ..with_state(issue("5", "backlog newer"), StateType::Backlog)
+        };
+        let older = Issue {
+            updated_at: "2026-11-01".into(),
+            ..with_state(issue("6", "backlog older"), StateType::Backlog)
+        };
+        load(
+            &mut app,
+            0,
+            vec![
+                older,
+                with_state(issue("4", "triage"), StateType::Triage),
+                issue("3", "unstarted none"),
+                newer,
+                urgent,
+                with_state(issue("1", "started"), StateType::Started),
+            ],
+        );
+        assert_eq!(
+            titles(&app),
+            [
+                "started",
+                "unstarted urgent",
+                "unstarted none",
+                "triage",
+                "backlog newer",
+                "backlog older",
+            ]
+        );
+    }
+
+    #[test]
+    fn shows_only_the_current_workspace_and_tab_switches_it() {
+        let mut app = app();
+        load(&mut app, 0, vec![issue("1", "work issue")]);
+        load(&mut app, 1, vec![issue("2", "side issue")]);
+        assert_eq!(titles(&app), ["work issue"]);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.workspace, 1);
+        assert_eq!(titles(&app), ["side issue"]);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.workspace, 0);
+        assert_eq!(titles(&app), ["work issue"]);
+    }
+
+    #[test]
+    fn typing_filters_the_list_and_selects_the_top_match() {
+        let mut app = app();
+        load(&mut app, 0, three_issues());
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.table.selected(), Some(1));
+        type_text(&mut app, "billing");
+        assert_eq!(titles(&app), ["Add billing page"]);
+        assert_eq!(app.table.selected(), Some(0));
+    }
+
+    #[test]
+    fn esc_clears_the_search_then_the_project_filter_then_quits() {
+        let mut app = app();
+        load(
+            &mut app,
+            0,
+            vec![
+                in_project(issue("1", "Fix login redirect"), "Auth"),
+                issue("2", "Add billing page"),
+            ],
+        );
+        app.on_key(ctrl('f'));
+        assert_eq!(app.project.as_deref(), Some("Auth"));
+        type_text(&mut app, "login");
+        assert_eq!(app.query, "login");
+
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.query, "");
+        assert_eq!(app.project.as_deref(), Some("Auth"));
+        assert!(!app.should_quit);
+
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.project, None);
+        assert!(!app.should_quit);
+
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn project_filter_cycles_through_projects_and_back_to_all() {
+        let mut app = app();
+        load(
+            &mut app,
+            0,
+            vec![
+                in_project(issue("1", "in b"), "B"),
+                in_project(issue("2", "in a"), "A"),
+                issue("3", "no project"),
+            ],
+        );
+        app.on_key(ctrl('f'));
+        assert_eq!(app.project.as_deref(), Some("A"));
+        assert_eq!(titles(&app), ["in a"]);
+        app.on_key(ctrl('f'));
+        assert_eq!(app.project.as_deref(), Some("B"));
+        assert_eq!(titles(&app), ["in b"]);
+        app.on_key(ctrl('f'));
+        assert_eq!(app.project, None);
+        assert_eq!(titles(&app).len(), 3);
+    }
+
+    #[test]
+    fn reload_keeps_the_selected_issue_selected() {
+        let mut app = app();
+        let dated = |id: &str, title: &str, updated_at: &str| Issue {
+            updated_at: updated_at.into(),
+            ..issue(id, title)
+        };
+        load(
+            &mut app,
+            0,
+            vec![
+                dated("1", "first", "2026-11-03"),
+                dated("2", "second", "2026-11-02"),
+                dated("3", "third", "2026-11-01"),
+            ],
+        );
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.selected().unwrap().issue.id, "3");
+
+        load(
+            &mut app,
+            0,
+            vec![
+                dated("1", "first", "2026-11-03"),
+                dated("2", "second", "2026-11-02"),
+                with_state(dated("3", "third", "2026-11-01"), StateType::Started),
+            ],
+        );
+        assert_eq!(titles(&app)[0], "third");
+        assert_eq!(app.selected().unwrap().issue.id, "3");
+    }
+
+    #[test]
+    fn a_failed_first_load_marks_the_workspace_failed() {
+        let mut app = app();
+        app.handle(Msg::Loaded {
+            workspace: 0,
+            result: Err("boom".into()),
+        });
+        assert!(matches!(
+            &app.workspaces[0].load,
+            WorkspaceLoad::Failed(error) if error == "boom"
+        ));
+        let (kind, text) = notice(&app);
+        assert!(kind == NoticeKind::Error && text.contains("boom"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_loaded_issues() {
+        let mut app = app();
+        load(&mut app, 0, three_issues());
+        app.handle(Msg::Loaded {
+            workspace: 0,
+            result: Err("boom".into()),
+        });
+        assert_eq!(app.entries.len(), 3);
+        assert_eq!(titles(&app).len(), 3);
+        assert!(matches!(
+            app.workspaces[0].load,
+            WorkspaceLoad::Ready { .. }
+        ));
+    }
+
+    #[test]
+    fn a_saved_issue_replaces_its_entry() {
+        let mut app = app();
+        load(&mut app, 0, vec![issue("1", "Old title")]);
+        app.handle(Msg::IssueSaved {
+            workspace: 0,
+            result: Ok(Box::new(issue("1", "New title"))),
+            what: Some("updated"),
+        });
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].issue.title, "New title");
+        let (kind, text) = notice(&app);
+        assert!(
+            kind == NoticeKind::Info && text == "ENG-1 updated",
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_created_issue_is_added_and_selected() {
+        let mut app = app();
+        load(&mut app, 0, three_issues());
+        app.handle(Msg::IssueSaved {
+            workspace: 0,
+            result: Ok(Box::new(issue("9", "Brand new"))),
+            what: Some("created"),
+        });
+        assert!(app.entries.iter().any(|e| e.issue.id == "9"));
+        assert_eq!(app.selected().unwrap().issue.id, "9");
+    }
+
+    #[test]
+    fn the_priority_picker_filters_and_closes() {
+        let mut app = app();
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        app.on_key(ctrl('p'));
+        let Mode::Picker(picker) = &app.mode else {
+            panic!("expected the priority picker");
+        };
+        assert_eq!(picker.items.len(), 5);
+        type_text(&mut app, "urg");
+        let Mode::Picker(picker) = &app.mode else {
+            panic!("expected the priority picker");
+        };
+        let labels: Vec<&str> = picker.matches().iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Urgent"]);
+        app.on_key(key(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn enter_opens_the_dispatch_screen_for_a_mapped_issue() {
+        let mut app = app();
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        app.on_key(key(KeyCode::Enter));
+        let Mode::Dispatch(dispatch) = &app.mode else {
+            panic!("expected the dispatch screen");
+        };
+        assert_eq!(dispatch.repos.len(), 1);
+        assert_eq!(dispatch.repo().path, Path::new("/"));
+        app.on_key(key(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn enter_reports_an_unmapped_team() {
+        let mut app = app();
+        let mut ops = issue("1", "Rotate certificates");
+        ops.identifier = "OPS-1".into();
+        ops.team = Team {
+            id: "team-ops".into(),
+            key: "OPS".into(),
+            name: "Operations".into(),
+        };
+        load(&mut app, 1, vec![ops]);
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Normal));
+        let (kind, text) = notice(&app);
+        assert!(kind == NoticeKind::Error && text.contains("OPS"), "{text}");
+    }
+
+    #[test]
+    fn ctrl_e_opens_a_comment_editor_and_esc_discards_it() {
+        let mut app = app();
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        app.on_key(ctrl('e'));
+        assert!(matches!(
+            app.mode,
+            Mode::Compose(Compose::Comment { .. }, _)
+        ));
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(matches!(
+            app.mode,
+            Mode::Compose(Compose::Comment { .. }, _)
+        ));
+        app.on_key(key(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn draws_every_mode_at_any_terminal_size() {
+        type Setup = fn(&mut App);
+        let modes: [(&str, Setup); 6] = [
+            ("empty", |_| {}),
+            ("three issues", |app| load(app, 0, three_issues())),
+            ("priority picker", |app| {
+                load(app, 0, three_issues());
+                app.on_key(ctrl('p'));
+            }),
+            ("comment editor", |app| {
+                load(app, 0, three_issues());
+                app.on_key(ctrl('e'));
+            }),
+            ("dispatch", |app| {
+                load(app, 0, three_issues());
+                app.on_key(key(KeyCode::Enter));
+            }),
+            ("long error", |app| {
+                app.handle(Msg::Loaded {
+                    workspace: 0,
+                    result: Err("x".repeat(300)),
+                });
+            }),
+        ];
+        for (name, setup) in modes {
+            for (width, height) in [(120, 40), (80, 24), (80, 10), (40, 12), (20, 5), (1, 1)] {
+                let mut app = app();
+                setup(&mut app);
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                        .unwrap();
+                terminal
+                    .draw(|frame| crate::tui::view::draw(frame, &mut app, 0))
+                    .unwrap_or_else(|e| panic!("{name} at {width}x{height}: {e}"));
+                if name == "three issues" && (width, height) == (80, 24) {
+                    let screen: String = terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .map(|cell| cell.symbol())
+                        .collect();
+                    assert!(screen.contains("Add billing page"), "{screen}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn new_issue_text_splits_title_from_description() {
