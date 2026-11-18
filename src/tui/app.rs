@@ -173,7 +173,7 @@ pub enum Mode {
     Dispatch(Box<Dispatch>),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
     Info,
     Error,
@@ -253,6 +253,7 @@ pub struct App {
     selection_changed_at: Instant,
     pub mode: Mode,
     pub notice: Option<Notice>,
+    sessions_error: Option<String>,
     pub busy: usize,
     pub starting: HashSet<String>,
     pub should_quit: bool,
@@ -301,6 +302,7 @@ impl App {
             selection_changed_at: Instant::now(),
             mode: Mode::Normal,
             notice: None,
+            sessions_error: None,
             busy: 0,
             starting: HashSet::new(),
             should_quit: false,
@@ -344,6 +346,14 @@ impl App {
             kind: NoticeKind::Error,
             text: text.into(),
         });
+    }
+
+    pub fn footer_notice(&self) -> Option<(NoticeKind, &str)> {
+        match (&self.notice, &self.sessions_error) {
+            (Some(notice), _) => Some((notice.kind, notice.text.as_str())),
+            (None, Some(error)) => Some((NoticeKind::Error, error.as_str())),
+            (None, None) => None,
+        }
     }
 
     pub fn refresh(&mut self) {
@@ -472,8 +482,11 @@ impl App {
                 }
                 self.checkout_preview = Some(preview);
             }
-            Msg::Sessions(Ok(sessions)) => self.sessions = sessions,
-            Msg::Sessions(Err(error)) => self.error(error),
+            Msg::Sessions(Ok(sessions)) => {
+                self.sessions = sessions;
+                self.sessions_error = None;
+            }
+            Msg::Sessions(Err(error)) => self.sessions_error = Some(error),
             Msg::Comments { key, result } => {
                 let state = match result {
                     Ok(comments) => Comments::Loaded(comments),
@@ -906,7 +919,7 @@ impl App {
                 KeyCode::Char('o') => self.open_in_browser(),
                 KeyCode::Char('f') => self.cycle_project(),
                 KeyCode::Char('r') => {
-                    self.info("Refreshing…");
+                    self.notice = None;
                     self.refresh();
                 }
                 KeyCode::Char('u') => {
@@ -1992,6 +2005,30 @@ mod tests {
         assert_ne!(selected, "1");
         saved(&mut app, issue("1", "Fix login redirect"), Saved::Updated);
         assert_eq!(app.selected().unwrap().issue.id, selected);
+    }
+
+    #[test]
+    fn a_session_poll_failure_does_not_replace_the_notice() {
+        let mut app = app();
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        saved(&mut app, issue("1", "Fix login redirect"), Saved::Updated);
+        app.handle(Msg::Sessions(Err("rex is down".into())));
+        assert_eq!(
+            app.footer_notice(),
+            Some((NoticeKind::Info, "ENG-1 updated"))
+        );
+    }
+
+    #[test]
+    fn a_session_poll_failure_shows_when_nothing_else_does() {
+        let mut app = app();
+        app.handle(Msg::Sessions(Err("rex is down".into())));
+        assert_eq!(
+            app.footer_notice(),
+            Some((NoticeKind::Error, "rex is down"))
+        );
+        app.handle(Msg::Sessions(Ok(vec![])));
+        assert_eq!(app.footer_notice(), None);
     }
 
     #[test]

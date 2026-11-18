@@ -37,10 +37,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, frame_count: usize) {
     };
     let width = frame.area().width.max(1) as usize;
     let key_lines = keys.chars().count().div_ceil(width) as u16;
-    let notice_lines = app
-        .notice
-        .as_ref()
-        .map_or(0, |n| (n.text.chars().count() + 1).div_ceil(width) as u16);
+    let notice_lines = app.footer_notice().map_or(0, |(_, text)| {
+        (text.chars().count() + 1).div_ceil(width) as u16
+    });
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
@@ -484,12 +483,12 @@ fn draw_dispatch(
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect, keys: &str) {
     let mut lines = Vec::new();
-    if let Some(notice) = &app.notice {
-        let color = match notice.kind {
+    if let Some((kind, text)) = app.footer_notice() {
+        let color = match kind {
             NoticeKind::Info => theme::BLUE,
             NoticeKind::Error => theme::RED,
         };
-        lines.push(Line::from(format!(" {}", notice.text)).fg(color));
+        lines.push(Line::from(format!(" {text}")).fg(color));
     }
     lines.push(Line::from(keys).fg(DIM));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
