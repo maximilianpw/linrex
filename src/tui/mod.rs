@@ -21,6 +21,7 @@ pub fn run(config: Config) -> Result<()> {
         restore_hook(info);
     }));
     let mut app = app::App::new(config);
+    app.refresh();
     let mut frame_count = 0usize;
     let result = (|| -> Result<()> {
         while !app.should_quit {

@@ -267,7 +267,7 @@ impl App {
             })
             .collect();
         let default_workspace = config.default_workspace;
-        let mut app = Self {
+        Self {
             config,
             rex: Rex,
             matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
@@ -296,9 +296,7 @@ impl App {
             sender,
             receiver,
             last_session_poll: Instant::now(),
-        };
-        app.refresh();
-        app
+        }
     }
 
     pub fn agents(&self) -> &[AgentConfig] {

@@ -242,7 +242,7 @@ impl Config {
         Ok(key)
     }
 
-    fn parse(text: &str) -> Result<(Self, Option<PathBuf>)> {
+    pub(crate) fn parse(text: &str) -> Result<(Self, Option<PathBuf>)> {
         let raw: RawConfig = toml::from_str(text)?;
         let env_file = raw.env_file.as_deref().map(expand_home).transpose()?;
         let default_naming = raw.checkouts.naming.as_deref().unwrap_or(DEFAULT_NAMING);
