@@ -380,7 +380,6 @@ impl App {
 
     fn poll_sessions(&mut self) {
         self.last_session_poll = Instant::now();
-        self.checkout_preview = None;
         let rex = self.rex.clone();
         self.spawn(move || Msg::Sessions(rex.sessions().map_err(|e| format!("{e:#}"))));
     }
@@ -458,6 +457,7 @@ impl App {
                         teams: snapshot.teams,
                     };
                     self.comments.retain(|key, _| key.workspace != workspace);
+                    self.checkout_preview = None;
                     self.recompute(selected);
                 }
                 Err(error) => {
@@ -489,6 +489,9 @@ impl App {
                 }
             }
             Msg::Sessions(Ok(sessions)) => {
+                if sessions != self.sessions {
+                    self.checkout_preview = None;
+                }
                 self.sessions = sessions;
                 self.sessions_error = None;
             }
@@ -2216,6 +2219,48 @@ mod tests {
         assert_eq!(dispatch(&app).checkout, main);
         app.handle(planned(first_issue_key(), 0));
         assert_eq!(dispatch(&app).checkout, main);
+    }
+
+    fn with_preview_and_one_session() -> App {
+        let mut app = app();
+        app.checkout_preview = Some(CheckoutPreview {
+            key: first_issue_key(),
+            text: "x".into(),
+        });
+        app.sessions = vec![one_session()];
+        app
+    }
+
+    fn one_session() -> RexSession {
+        RexSession {
+            session_id: "s1".into(),
+            label: "ENG-1".into(),
+        }
+    }
+
+    #[test]
+    fn an_unchanged_session_list_keeps_the_checkout_preview() {
+        let mut app = with_preview_and_one_session();
+        app.handle(Msg::Sessions(Ok(vec![one_session()])));
+        assert!(app.checkout_preview.is_some());
+    }
+
+    #[test]
+    fn a_changed_session_list_refreshes_the_checkout_preview() {
+        let mut app = with_preview_and_one_session();
+        app.handle(Msg::Sessions(Ok(vec![])));
+        assert!(app.checkout_preview.is_none());
+    }
+
+    #[test]
+    fn a_reload_refreshes_the_checkout_preview() {
+        let mut app = app();
+        app.checkout_preview = Some(CheckoutPreview {
+            key: first_issue_key(),
+            text: "x".into(),
+        });
+        load(&mut app, 0, vec![issue("1", "Fix login redirect")]);
+        assert!(app.checkout_preview.is_none());
     }
 
     #[test]
