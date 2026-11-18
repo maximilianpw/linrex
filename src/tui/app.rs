@@ -1669,6 +1669,7 @@ mod tests {
                     organization: "Org".into(),
                     teams: vec![eng_team()],
                     issues,
+                    truncated: false,
                 },
             ))),
         });

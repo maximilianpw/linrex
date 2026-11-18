@@ -8,6 +8,7 @@ pub use model::*;
 
 const ENDPOINT: &str = "https://api.linear.app/graphql";
 const PAGE_LIMIT: usize = 5;
+const COMMENT_PAGE_LIMIT: usize = 5;
 
 const ISSUE_FIELDS: &str = "
 fragment IssueFields on Issue {
@@ -71,8 +72,8 @@ struct PageInfo {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct IssuePage {
-    nodes: Vec<model::RawIssue>,
+struct Page<T> {
+    nodes: Vec<T>,
     page_info: PageInfo,
 }
 
@@ -129,12 +130,13 @@ impl LinearClient {
         )?;
         let active = json!({ "state": { "type": { "nin": ["completed", "canceled"] } } });
 
-        let issues = self.issue_pages(
+        let (issues, truncated) = self.pages::<model::RawIssue>(
             "/viewer/assignedIssues",
             &format!(
                 "query($after: String, $filter: IssueFilter) {{ viewer {{ assignedIssues(first: 100, after: $after, filter: $filter, orderBy: updatedAt) {{ nodes {{ ...IssueFields }} pageInfo {{ hasNextPage endCursor }} }} }} }} {ISSUE_FIELDS}"
             ),
-            active,
+            json!({ "filter": active }),
+            PAGE_LIMIT,
         )?;
 
         Ok(WorkspaceSnapshot {
@@ -144,29 +146,37 @@ impl LinearClient {
             },
             organization: data.organization.name,
             teams: data.viewer.teams.nodes,
-            issues,
+            issues: issues.into_iter().map(Issue::from).collect(),
+            truncated,
         })
     }
 
-    fn issue_pages(&self, page_path: &str, query: &str, filter: Value) -> LinearResult<Vec<Issue>> {
-        let mut issues = Vec::new();
+    fn pages<T: DeserializeOwned>(
+        &self,
+        page_path: &str,
+        query: &str,
+        mut variables: Value,
+        limit: usize,
+    ) -> LinearResult<(Vec<T>, bool)> {
+        let mut nodes = Vec::new();
         let mut after: Option<String> = None;
-        for _ in 0..PAGE_LIMIT {
-            let data: Value = self.request(query, json!({ "after": after, "filter": filter }))?;
+        for _ in 0..limit {
+            variables["after"] = json!(after);
+            let data: Value = self.request(query, variables.clone())?;
             let page = data
                 .pointer(page_path)
                 .ok_or_else(|| LinearError::Graphql(format!("response is missing {page_path}")))?;
-            let page = IssuePage::deserialize(page)?;
-            issues.extend(page.nodes.into_iter().map(Issue::from));
+            let page = Page::<T>::deserialize(page)?;
+            nodes.extend(page.nodes);
             match page.page_info {
                 PageInfo {
                     has_next_page: true,
                     end_cursor: Some(cursor),
                 } => after = Some(cursor),
-                _ => break,
+                _ => return Ok((nodes, false)),
             }
         }
-        Ok(issues)
+        Ok((nodes, true))
     }
 
     pub fn issue(&self, id: &str) -> LinearResult<Issue> {
@@ -184,19 +194,12 @@ impl LinearClient {
     }
 
     pub fn comments(&self, issue_id: &str) -> LinearResult<Vec<Comment>> {
-        #[derive(Deserialize)]
-        struct Data {
-            issue: IssueComments,
-        }
-        #[derive(Deserialize)]
-        struct IssueComments {
-            comments: model::Nodes<Comment>,
-        }
-        let data: Data = self.request(
-            "query($id: String!) { issue(id: $id) { comments(first: 50) { nodes { body createdAt user { id displayName } } } } }",
+        let (mut comments, _truncated) = self.pages::<Comment>(
+            "/issue/comments",
+            "query($id: String!, $after: String) { issue(id: $id) { comments(first: 50, after: $after) { nodes { body createdAt user { id displayName } } pageInfo { hasNextPage endCursor } } } }",
             json!({ "id": issue_id }),
+            COMMENT_PAGE_LIMIT,
         )?;
-        let mut comments = data.issue.comments.nodes;
         comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(comments)
     }
@@ -439,6 +442,84 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].authorization.as_deref(), Some("test-key"));
         assert!(requests[0].body.contains(r#""id":"ENG-1129""#));
+    }
+
+    const VIEWER: &str = r#"{"data":{"viewer":{"id":"u","displayName":"Me","teams":{"nodes":[]}},"organization":{"name":"Org"}}}"#;
+
+    fn page_info(next: Option<&str>) -> String {
+        match next {
+            Some(cursor) => format!(r#"{{"hasNextPage":true,"endCursor":"{cursor}"}}"#),
+            None => r#"{"hasNextPage":false,"endCursor":null}"#.into(),
+        }
+    }
+
+    fn issue_page(next: Option<&str>) -> String {
+        format!(
+            r#"{{"data":{{"viewer":{{"assignedIssues":{{"nodes":[{ISSUE}],"pageInfo":{}}}}}}}}}"#,
+            page_info(next)
+        )
+    }
+
+    fn comment_page(created: &[&str], next: Option<&str>) -> String {
+        let nodes: Vec<String> = created
+            .iter()
+            .map(|at| format!(r#"{{"body":"{at}","createdAt":"{at}","user":null}}"#))
+            .collect();
+        format!(
+            r#"{{"data":{{"issue":{{"comments":{{"nodes":[{}],"pageInfo":{}}}}}}}}}"#,
+            nodes.join(","),
+            page_info(next)
+        )
+    }
+
+    #[test]
+    fn follows_issue_pages_until_the_last() {
+        let (endpoint, server) = serve(vec![
+            VIEWER.into(),
+            issue_page(Some("c1")),
+            issue_page(None),
+        ]);
+        let snapshot = client(endpoint).snapshot().unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(snapshot.issues.len(), 2);
+        assert!(!snapshot.truncated);
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].body.contains(r#""after":"c1""#));
+    }
+
+    #[test]
+    fn reports_truncation_at_the_page_limit() {
+        let mut responses = vec![VIEWER.to_owned()];
+        responses.extend((0..PAGE_LIMIT).map(|n| issue_page(Some(&format!("c{n}")))));
+        let (endpoint, server) = serve(responses);
+        let snapshot = client(endpoint).snapshot().unwrap();
+        let requests = server.join().unwrap();
+        assert!(snapshot.truncated);
+        assert_eq!(snapshot.issues.len(), PAGE_LIMIT);
+        assert_eq!(requests.len(), PAGE_LIMIT + 1);
+    }
+
+    #[test]
+    fn fetches_every_comment_page_and_sorts_by_time() {
+        let (endpoint, server) = serve(vec![
+            comment_page(
+                &["2026-11-03T00:00:00.000Z", "2026-11-01T00:00:00.000Z"],
+                Some("c1"),
+            ),
+            comment_page(&["2026-11-02T00:00:00.000Z"], None),
+        ]);
+        let comments = client(endpoint).comments("i1").unwrap();
+        let requests = server.join().unwrap();
+        let created: Vec<&str> = comments.iter().map(|c| c.created_at.as_str()).collect();
+        assert_eq!(
+            created,
+            [
+                "2026-11-01T00:00:00.000Z",
+                "2026-11-02T00:00:00.000Z",
+                "2026-11-03T00:00:00.000Z",
+            ]
+        );
+        assert!(requests[1].body.contains(r#""after":"c1""#));
     }
 
     #[test]

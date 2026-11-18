@@ -182,6 +182,7 @@ pub struct WorkspaceSnapshot {
     pub organization: String,
     pub teams: Vec<Team>,
     pub issues: Vec<Issue>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
